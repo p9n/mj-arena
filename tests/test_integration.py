@@ -22,14 +22,30 @@ CLIENT_SCRIPT = str(PROJECT_ROOT / "client" / "simple_client.py")
 class IntegrationTest(unittest.TestCase):
 
   def test_cli_args_defaults_and_partial_clients(self) -> None:
-    """Verify --client-cpus=1, --client-memory-mb=4096 defaults and 0~4 --clients."""
+    """Verify --client-cpus=1, --client-memory-mb=4096 defaults, 0~4 --clients, and --iterations / --log-dir."""
     args0 = parse_args([])
     self.assertEqual(args0.client_cpus, 1)
     self.assertEqual(args0.client_memory_mb, 4096)
     self.assertEqual(args0.clients, [])
+    self.assertIsNone(args0.iterations)
+    self.assertIsNone(args0.log_dir)
 
     args2 = parse_args(["--clients", "cmd1", "cmd2"])
     self.assertEqual(args2.clients, ["cmd1", "cmd2"])
+
+    args_iter = parse_args(["--iterations", "3", "--log-dir", "logs_out"])
+    self.assertEqual(args_iter.iterations, 3)
+    self.assertEqual(args_iter.log_dir, "logs_out")
+    self.assertIsNone(args_iter.paifu)
+
+    # --log and --log-dir cannot appear together
+    with self.assertRaises(SystemExit):
+      parse_args(["--log", "a.json", "--log-dir", "logs_out"])
+    with self.assertRaises(SystemExit):
+      parse_args(["--paifu", "a.json", "--log-dir", "logs_out"])
+    # --iterations requires --log-dir
+    with self.assertRaises(SystemExit):
+      parse_args(["--iterations", "2"])
 
   def test_full_hanchan_with_four_clients_and_paifu(self) -> None:
     """Run a complete Hanchan match with 4 simple_client.py subprocesses."""
