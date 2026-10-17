@@ -17,18 +17,25 @@ from server.tile import parse_mpsz
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 CLIENT_BIN = str(PROJECT_ROOT / "client" / "simple_client")
+TAG_CLIENT_BIN = str(PROJECT_ROOT / "client" / "tag_client")
 
 
 class IntegrationTest(unittest.TestCase):
 
   def test_cli_args_defaults_and_partial_clients(self) -> None:
-    """Verify --client-cpus=1, --client-memory-mb=4096 defaults, 0~4 --clients, and --iterations / --log-dir."""
+    """Verify --client-cpus=1, --client-memory-mb=4096 defaults, 0~4 --clients, --tag defaults, and --iterations / --log-dir."""
     args0 = parse_args([])
     self.assertEqual(args0.client_cpus, 1)
     self.assertEqual(args0.client_memory_mb, 4096)
     self.assertEqual(args0.clients, [])
+    self.assertFalse(args0.tag)
     self.assertIsNone(args0.iterations)
     self.assertIsNone(args0.log_dir)
+
+    args_tag = parse_args(["--tag"])
+    self.assertTrue(args_tag.tag)
+    self.assertEqual(args_tag.client_cpus, 2)
+    self.assertEqual(args_tag.client_memory_mb, 8192)
 
     args2 = parse_args(["--clients", "cmd1", "cmd2"])
     self.assertEqual(args2.clients, ["cmd1", "cmd2"])
@@ -52,6 +59,7 @@ class IntegrationTest(unittest.TestCase):
 
     async def run_match() -> None:
       cfg = ServerConfig.load(PROJECT_ROOT / "config.json")
+      cfg.rules.game_mode = "4p"
       cmd = f"{CLIENT_BIN} --mode normal"
       with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as tmpdir:
         paifu_path = Path(tmpdir) / "test_paifu.json"
@@ -93,6 +101,50 @@ class IntegrationTest(unittest.TestCase):
         self.assertEqual(total_pt, 0.0)
 
     asyncio.run(run_match())
+
+  def test_full_tag_match_with_two_tag_clients(self) -> None:
+    """Run a complete 2v2 (Tag Match) Hanchan with 2 tag_client subprocesses."""
+
+    async def run_tag_match() -> None:
+      cfg = ServerConfig.load(PROJECT_ROOT / "config.json")
+      cfg.rules.game_mode = "2v2"
+      cfg.client_cpus = 2
+      cfg.client_memory_mb = 8192
+      cmd = f"{TAG_CLIENT_BIN} --mode normal"
+      with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as tmpdir:
+        paifu_path = Path(tmpdir) / "test_tag_paifu.json"
+        engine = MatchEngine(
+            config=cfg,
+            client_cmds=[cmd, cmd],
+            rng=random.Random(42),
+            paifu_path=str(paifu_path),
+            seed=42,
+        )
+        result = await engine.run_match()
+        self.assertTrue(paifu_path.exists())
+        saved = json.loads(paifu_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["rules"]["game_mode"], "2v2")
+        self.assertEqual(len(saved["seating"]), 4)
+        self.assertEqual(
+            [s["role"] for s in saved["seating"]],
+            ["kamicha", "shimocha", "kamicha", "shimocha"],
+        )
+        self.assertEqual(
+            [s["team"] for s in saved["seating"]],
+            [0, 0, 1, 1],
+        )
+        # Final standings only include the two Shimocha players (Seat 1 and Seat 3)
+        self.assertEqual(len(result["final_results"]), 2)
+        self.assertEqual(
+            sorted(item["seat"] for item in result["final_results"]),
+            [1, 3],
+        )
+        for item in result["final_results"]:
+          self.assertIn("partner_seat", item)
+          self.assertIn("partner_raw_score", item)
+          self.assertIn("partner_final_pt", item)
+
+    asyncio.run(run_tag_match())
 
   def test_client_timeout_auto_tsumogiri(self) -> None:
     """Verify that a client exceeding timeout_sec is auto-tsumogiri'd without crashing."""

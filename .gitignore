@@ -4,3 +4,4 @@ __pycache__/
 .pytest_cache/
 *.stderr
 client/simple_client
+client/tag_client

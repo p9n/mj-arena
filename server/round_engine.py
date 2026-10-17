@@ -367,6 +367,7 @@ class RoundEngine:
             current_seat,
             {
                 "type": "turn_tsumo",
+                "seat": current_seat,
                 "tile": drawn_token,
                 "is_rinshan": is_rinshan_draw,
                 "remaining_tiles": self.wall.remaining_tiles,
@@ -381,6 +382,7 @@ class RoundEngine:
             current_seat,
             {
                 "type": "turn_after_call",
+                "seat": current_seat,
                 "forbidden_discards": forb_tokens,
                 "hand": list(player.closed_tiles),
             },

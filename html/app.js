@@ -83,11 +83,22 @@ function extractExecutableName(cmdStr, fallbackSeat) {
   return base0;
 }
 
+function isTagMatchMode() {
+  if (!paifuData || !paifuData.rules) return false;
+  const gm = paifuData.rules.game_mode;
+  return gm === "2v2" || gm === "tag";
+}
+
 function getPlayerName(seat) {
   if (paifuData && Array.isArray(paifuData.seating)) {
     const info = paifuData.seating.find((item) => item.seat === seat);
     if (info && info.client_cmd) {
-      return extractExecutableName(info.client_cmd, seat);
+      const baseName = extractExecutableName(info.client_cmd, seat);
+      if (isTagMatchMode() && typeof info.team === "number") {
+        const roleTag = info.role === "kamicha" ? "上" : "下";
+        return `${baseName}[T${info.team + 1}${roleTag}]`;
+      }
+      return baseName;
     }
   }
   return `Player ${seat}`;
@@ -710,6 +721,8 @@ function renderFinalStandings(mode) {
       seat: r.seat,
       raw_score: r.raw_score,
       raw_pt: rawPt,
+      partner_seat: r.partner_seat,
+      partner_raw_score: r.partner_raw_score,
     };
   });
 
@@ -763,9 +776,13 @@ function renderFinalStandings(mode) {
     } else {
       ptDisplay = row.final_pt > 0 ? `+${row.final_pt.toFixed(1)}` : row.final_pt.toFixed(1);
     }
+    const partnerNote =
+      typeof row.partner_raw_score === "number"
+        ? `<div style="font-size:0.7rem;color:var(--text-secondary);">上家: ${row.partner_raw_score.toLocaleString()}</div>`
+        : "";
     tr.innerHTML = `
       <td>#${row.rank}</td>
-      <td>${getPlayerName(row.seat)}</td>
+      <td>${getPlayerName(row.seat)}${partnerNote}</td>
       <td>${row.raw_score.toLocaleString()}</td>
       <td class="${ptClass}">${ptDisplay}</td>
     `;
@@ -778,8 +795,9 @@ function loadPaifuObject(data) {
   const rawMode = (data.rules && data.rules.ranking_mode) || "plus_minus_zero";
   const isPm0 = rawMode === "plus_minus_zero" || rawMode === "正負0" || rawMode === "pm0";
   const modeLabel = isPm0 ? "正負0" : "一般";
+  const tagPrefix = isTagMatchMode() ? "2v2 · " : "";
   const seedTag = data.seed !== undefined && data.seed !== null ? ` | Seed: ${data.seed}` : "";
-  document.getElementById("match-id-badge").textContent = `Match: ${data.match_id || "Loaded"}${seedTag} (${modeLabel})`;
+  document.getElementById("match-id-badge").textContent = `Match: ${data.match_id || "Loaded"}${seedTag} (${tagPrefix}${modeLabel})`;
 
   // Update player executable names on seat headers
   for (let s = 0; s < 4; s++) {

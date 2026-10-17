@@ -1,18 +1,20 @@
 CXX := g++
 CXXFLAGS := -std=c++20 -O2 -Wall -Wextra
 
-TARGET := client/simple_client
-SRC := client/simple_client.cpp
+TARGETS := client/simple_client client/tag_client
 
 .PHONY: all clean test
 
-all: $(TARGET)
+all: $(TARGETS)
 
-$(TARGET): $(SRC)
-	$(CXX) $(CXXFLAGS) $< -o $@
+client/simple_client: client/simple_client.cpp
+	$(CXX) $(CXXFLAGS) client/simple_client.cpp -o $@
 
-test: $(TARGET)
+client/tag_client: client/tag_client.cpp client/simple_client.cpp
+	$(CXX) $(CXXFLAGS) client/tag_client.cpp -o $@
+
+test: $(TARGETS)
 	python3 -m unittest discover -s tests -v
 
 clean:
-	rm -f $(TARGET)
+	rm -f $(TARGETS)

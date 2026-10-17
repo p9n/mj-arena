@@ -407,6 +407,78 @@ class RulesEdgeTest(unittest.TestCase):
     self.assertEqual([s["final_pt"] for s in standings_tied], [10, -10, 40, -40])
     self.assertEqual([s["rank"] for s in standings_tied], [1, 1, 3, 3])
 
+  def test_tag_mode_immortal_kamicha_and_shimocha_standings(self) -> None:
+    """Verify 2v2 Tag Match: Kamicha (0, 2) cannot die (< 0 no tobi), 4p Uma/Oka pt, and Shimocha-only (1, 3) final ranking."""
+    cfg = ServerConfig()
+    cfg.rules.game_mode = "2v2"
+    cfg.rules.ranking_mode = "normal"
+    match = MatchEngine(cfg, ["cmd_a", "cmd_b"], rng=None)
+    match.dealer_first_seat = 0
+
+    # Verify Team 0 controls (0, 1) and Team 1 controls (2, 3) sharing 2 connections
+    self.assertIs(match.ipc.clients[0], match.ipc.clients[1])
+    self.assertIs(match.ipc.clients[2], match.ipc.clients[3])
+    self.assertIsNot(match.ipc.clients[0], match.ipc.clients[2])
+
+    # Kamicha (seat 0 and seat 2) having negative score does NOT trigger Tobi!
+    match.scores = [-5000, 45000, -2000, 62000]
+    self.assertFalse(match._has_tobi())
+    self.assertFalse(
+        match._should_end_match(
+            wind_idx=0,
+            round_number=2,
+            dealer_seat=1,
+            result_type="tsumo",
+            renchan=False,
+        )
+    )
+
+    # Shimocha (seat 1 or seat 3) having negative score DOES trigger Tobi!
+    match.scores = [45000, -100, 30000, 25100]
+    self.assertTrue(match._has_tobi())
+    self.assertTrue(
+        match._should_end_match(
+            wind_idx=0,
+            round_number=2,
+            dealer_seat=1,
+            result_type="tsumo",
+            renchan=False,
+        )
+    )
+
+    # Check 4-player Uma/Oka calculation and Shimocha-only final standings in normal mode:
+    # Scores: Seat 0 = 50000 (4p 1st: +20+20+20 = +60.0)
+    #         Seat 1 = 15000 (4p 3rd: -15-10    = -25.0)
+    #         Seat 2 = -5000 (4p 4th: -35-20    = -55.0)
+    #         Seat 3 = 40000 (4p 2nd: +10+10    = +20.0)
+    match.scores = [50000, 15000, -5000, 40000]
+    standings_normal = match._compute_final_standings()
+    self.assertEqual(len(standings_normal), 2)
+    self.assertEqual([s["seat"] for s in standings_normal], [3, 1])
+    self.assertEqual([s["rank"] for s in standings_normal], [1, 2])
+    self.assertEqual([s["final_pt"] for s in standings_normal], [20.0, -25.0])
+    self.assertEqual([s["partner_seat"] for s in standings_normal], [2, 0])
+    self.assertEqual([s["partner_raw_score"] for s in standings_normal], [-5000, 50000])
+    self.assertEqual([s["partner_final_pt"] for s in standings_normal], [-55.0, 60.0])
+
+    # Now check 2v2 combined with plus_minus_zero (正負0) mode:
+    # Seat 1 has raw_pt = -25.0 (gosha = -25, abs = 25)
+    # Seat 3 has raw_pt = +20.0 (gosha = +20, abs = 20)
+    # Wait: what if Seat 1 is closer to 0 than Seat 3?
+    # Let Seat 0 = 45000 (4p 1st: +55.0 -> +55)
+    #     Seat 3 = 35000 (4p 2nd: +15.0 -> +15, abs 15)
+    #     Seat 1 = 22000 (4p 3rd: -18.0 -> -18, abs 18)
+    #     Seat 2 = -2000 (4p 4th: -52.0 -> -52)
+    # And what if Seat 1 = 28000 (4p 2nd: +8.0 -> +8, abs 8) and Seat 3 = 40000 (4p 1st: +50.0 -> +50, abs 50)?
+    # Then in plus_minus_zero mode, Seat 1 (abs 8) beats Seat 3 (abs 50)!
+    cfg.rules.ranking_mode = "plus_minus_zero"
+    match.scores = [22000, 28000, 10000, 40000]
+    standings_pm0 = match._compute_final_standings()
+    self.assertEqual(len(standings_pm0), 2)
+    self.assertEqual([s["seat"] for s in standings_pm0], [1, 3])
+    self.assertEqual([s["rank"] for s in standings_pm0], [1, 2])
+    self.assertEqual([s["final_pt"] for s in standings_pm0], [8, 50])
+
 
 if __name__ == "__main__":
   unittest.main()

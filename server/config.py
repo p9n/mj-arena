@@ -12,6 +12,7 @@ from typing import Any
 class RuleConfig:
   """Configurable game rules (Tenhou 4-player Hanchan defaults)."""
 
+  game_mode: str = "4p"  # "4p" (standard 4-player) or "2v2" ("tag")
   ranking_mode: str = "normal"  # "normal" or "plus_minus_zero" ("正負0")
   kuitan: bool = True
   aka_dora: bool = True
@@ -28,6 +29,10 @@ class RuleConfig:
   pao_suukantsu: bool = False
   noten_riichi_chombo_on_draw: bool = True
 
+  @property
+  def is_tag_mode(self) -> bool:
+    return self.game_mode in ("2v2", "tag", "tag_match")
+
   @classmethod
   def from_dict(cls, data: dict[str, Any]) -> RuleConfig:
     valid_keys = {f.name for f in cls.__dataclass_fields__.values()}
@@ -36,6 +41,7 @@ class RuleConfig:
 
   def to_dict(self) -> dict[str, Any]:
     return {
+        "game_mode": self.game_mode,
         "ranking_mode": self.ranking_mode,
         "kuitan": self.kuitan,
         "aka_dora": self.aka_dora,

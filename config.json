@@ -1,7 +1,8 @@
 {
-  "timeout_sec": 5.0,
+  "timeout_sec": 1.0,
   "rules": {
     "ranking_mode": "plus_minus_zero",
+    "game_mode": "2v2",
     "kuitan": true,
     "aka_dora": true,
     "start_points": 25000,

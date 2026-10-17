@@ -29,25 +29,40 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
       help="Path to config.json (default: ./config.json)",
   )
   parser.add_argument(
+      "--tag",
+      "--2v2",
+      dest="tag",
+      action="store_true",
+      help="Enable 2v2 Tag Match mode (2 clients, each controlling 2 adjacent seats)",
+  )
+  parser.add_argument(
+      "--game-mode",
+      dest="game_mode",
+      choices=["4p", "2v2", "tag"],
+      default=None,
+      help="Game mode: 4p (standard 4-player) or 2v2/tag (2v2 Tag Match)",
+  )
+  parser.add_argument(
       "--clients",
       nargs="*",
       default=[],
       help=(
-          "0 to 4 client command strings to spawn. If fewer than 4 are given, "
-          "remaining seats are filled with `client/simple_client --mode=normal`."
+          "Client command strings to spawn (0~4 in 4p mode, filled with "
+          "`client/simple_client --mode=normal`; 0~2 in 2v2 tag mode, filled "
+          "with `client/tag_client --mode=normal`)."
       ),
   )
   parser.add_argument(
       "--client-cpus",
       type=int,
-      default=1,
-      help="Number of CPU cores per client process (default: 1)",
+      default=None,
+      help="Number of CPU cores per client process (default: 1 in 4p, 2 in 2v2)",
   )
   parser.add_argument(
       "--client-memory-mb",
       type=int,
-      default=4096,
-      help="Memory hard limit in MB per client process (default: 4096)",
+      default=None,
+      help="Memory hard limit in MB per client process (default: 4096 in 4p, 8192 in 2v2)",
   )
   parser.add_argument(
       "--client-log-dir",
@@ -84,6 +99,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
       help="Optional RNG seed for reproducible matches",
   )
   args = parser.parse_args(argv)
+  is_tag_cli = bool(args.tag or args.game_mode in ("2v2", "tag"))
+  args.client_cpus_explicit = args.client_cpus is not None
+  args.client_memory_mb_explicit = args.client_memory_mb is not None
+  if args.client_cpus is None:
+    args.client_cpus = 2 if is_tag_cli else 1
+  if args.client_memory_mb is None:
+    args.client_memory_mb = 8192 if is_tag_cli else 4096
   if args.iterations is not None:
     if args.iterations < 1:
       parser.error("--iterations must be >= 1")
@@ -97,20 +119,37 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 async def async_main(argv: list[str] | None = None) -> int:
   args = parse_args(argv)
   config = ServerConfig.load(args.config)
-  config.client_cpus = args.client_cpus
-  config.client_memory_mb = args.client_memory_mb
+  if args.tag or args.game_mode in ("2v2", "tag"):
+    config.rules.game_mode = "2v2"
+  elif args.game_mode == "4p":
+    config.rules.game_mode = "4p"
+
+  if config.rules.is_tag_mode:
+    config.client_cpus = args.client_cpus if args.client_cpus_explicit else 2
+    config.client_memory_mb = (
+        args.client_memory_mb if args.client_memory_mb_explicit else 8192
+    )
+    default_client_cmd = (
+        f"{PROJECT_ROOT / 'client' / 'tag_client'} --mode=normal"
+    )
+    max_clients = 2
+  else:
+    config.client_cpus = args.client_cpus
+    config.client_memory_mb = args.client_memory_mb
+    default_client_cmd = (
+        f"{PROJECT_ROOT / 'client' / 'simple_client'} --mode=normal"
+    )
+    max_clients = 4
+
   config.client_log_dir = args.client_log_dir
 
-  default_client_cmd = (
-      f"{PROJECT_ROOT / 'client' / 'simple_client'} --mode=normal"
-  )
   provided_clients = list(args.clients or [])
-  if len(provided_clients) > 4:
+  if len(provided_clients) > max_clients:
     raise ValueError(
-        f"Expected at most 4 client commands, got {len(provided_clients)}."
+        f"Expected at most {max_clients} client commands, got {len(provided_clients)}."
     )
   client_cmds = provided_clients + [default_client_cmd] * (
-      4 - len(provided_clients)
+      max_clients - len(provided_clients)
   )
 
   num_iterations = args.iterations if args.iterations is not None else 1

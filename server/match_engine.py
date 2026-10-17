@@ -33,10 +33,14 @@ class MatchEngine:
       paifu_path: str | None = None,
       seed: int | None = None,
   ) -> None:
-    if len(client_cmds) != 4:
-      raise ValueError(f"Expected 4 client commands, got {len(client_cmds)}")
     self.config = config
     self.rules = config.rules
+    self.is_tag_mode = self.rules.is_tag_mode
+    expected_clients = 2 if self.is_tag_mode else 4
+    if len(client_cmds) != expected_clients:
+      raise ValueError(
+          f"Expected {expected_clients} client commands, got {len(client_cmds)}"
+      )
     if seed is not None:
       self.seed: int | None = seed
       self.rng = rng or random.Random(seed)
@@ -48,32 +52,70 @@ class MatchEngine:
       self.rng = rng
     self.paifu_path = paifu_path
 
-    # Randomly assign the 4 client processes to seats 0, 1, 2, 3
     indexed_cmds = list(enumerate(client_cmds))
     self.rng.shuffle(indexed_cmds)
 
     self.seating_info: list[dict[str, Any]] = []
     self.clients: dict[int, ClientConnection] = {}
-    for seat, (orig_idx, cmd) in enumerate(indexed_cmds):
-      stderr_log_path = None
-      if config.client_log_dir:
-        stderr_log_path = str(Path(config.client_log_dir) / f"seat{seat}.stderr")
-      conn = ClientConnection(
-          seat=seat,
-          cmd=cmd,
-          client_cpus=config.client_cpus,
-          client_memory_mb=config.client_memory_mb,
-          send_timeout_sec=min(2.0, config.timeout_sec),
-          stderr_log_path=stderr_log_path,
-      )
-      self.clients[seat] = conn
-      self.seating_info.append(
-          {
-              "seat": seat,
-              "client_index": orig_idx,
-              "client_cmd": conn.cmd_str,
-          }
-      )
+    if self.is_tag_mode:
+      # 2v2 Tag Match: Team 0 controls (Seat 0: Kamicha, Seat 1: Shimocha),
+      # Team 1 controls (Seat 2: Kamicha, Seat 3: Shimocha).
+      for team_idx, (orig_idx, cmd) in enumerate(indexed_cmds):
+        kamicha_seat = team_idx * 2
+        shimocha_seat = team_idx * 2 + 1
+        stderr_log_path = None
+        if config.client_log_dir:
+          stderr_log_path = str(
+              Path(config.client_log_dir) / f"team{team_idx}.stderr"
+          )
+        conn = ClientConnection(
+            seat=kamicha_seat,
+            cmd=cmd,
+            client_cpus=config.client_cpus,
+            client_memory_mb=config.client_memory_mb,
+            send_timeout_sec=min(2.0, config.timeout_sec),
+            stderr_log_path=stderr_log_path,
+        )
+        self.clients[kamicha_seat] = conn
+        self.clients[shimocha_seat] = conn
+        for seat, role, partner in (
+            (kamicha_seat, "kamicha", shimocha_seat),
+            (shimocha_seat, "shimocha", kamicha_seat),
+        ):
+          self.seating_info.append(
+              {
+                  "seat": seat,
+                  "team": team_idx,
+                  "role": role,
+                  "partner_seat": partner,
+                  "client_index": orig_idx,
+                  "client_cmd": conn.cmd_str,
+              }
+          )
+    else:
+      # Standard 4p: randomly assign the 4 client processes to seats 0, 1, 2, 3
+      for seat, (orig_idx, cmd) in enumerate(indexed_cmds):
+        stderr_log_path = None
+        if config.client_log_dir:
+          stderr_log_path = str(
+              Path(config.client_log_dir) / f"seat{seat}.stderr"
+          )
+        conn = ClientConnection(
+            seat=seat,
+            cmd=cmd,
+            client_cpus=config.client_cpus,
+            client_memory_mb=config.client_memory_mb,
+            send_timeout_sec=min(2.0, config.timeout_sec),
+            stderr_log_path=stderr_log_path,
+        )
+        self.clients[seat] = conn
+        self.seating_info.append(
+            {
+                "seat": seat,
+                "client_index": orig_idx,
+                "client_cmd": conn.cmd_str,
+            }
+        )
 
     # Roll 2d6 to determine the starting dealer (起家) for East 1
     self.dice_seating: tuple[int, int] = (
@@ -112,6 +154,16 @@ class MatchEngine:
         key=lambda s: (-scores[s], (s - self.dealer_first_seat) % 4),
     )
 
+  def _has_tobi(self) -> bool:
+    """Return True if a mortal player's score is strictly negative (< 0)."""
+    if not self.rules.tobi_enabled:
+      return False
+    if self.rules.is_tag_mode:
+      # In 2v2 tag mode, Kamicha seats (0 and 2) are immortal and cannot bust;
+      # only Shimocha seats (1 and 3) can trigger Tobi.
+      return any(self.scores[s] < 0 for s in (1, 3))
+    return any(sc < 0 for sc in self.scores)
+
   def _should_end_match(
       self,
       wind_idx: int,
@@ -122,7 +174,7 @@ class MatchEngine:
   ) -> bool:
     """Evaluate Tenhou Hanchan / Sudden Death termination rules after a round."""
     # 1. Tobi (飛び終了: negative points ends match immediately; 0 continues)
-    if self.rules.tobi_enabled and any(sc < 0 for sc in self.scores):
+    if self._has_tobi():
       return True
 
     # 2. Chombo replays the same round (unless tobi occurred above)
@@ -194,12 +246,53 @@ class MatchEngine:
           }
       )
 
-    if self.rules.ranking_mode in ("plus_minus_zero", "正負0", "pm0"):
+    is_pm0 = self.rules.ranking_mode in ("plus_minus_zero", "正負0", "pm0")
+    if is_pm0:
       for item in standings:
         raw_pt = float(item["final_pt"])
         item["raw_pt"] = raw_pt
         item["final_pt"] = gosha_rokuiri(raw_pt)
 
+    if self.rules.is_tag_mode:
+      by_seat = {int(item["seat"]): dict(item) for item in standings}
+      shimocha_items = [by_seat[1], by_seat[3]]
+      for item in shimocha_items:
+        s = int(item["seat"])
+        p_seat = s - 1
+        p_info = by_seat[p_seat]
+        item["team"] = 0 if s == 1 else 1
+        item["partner_seat"] = p_seat
+        item["partner_raw_score"] = p_info["raw_score"]
+        item["partner_final_pt"] = p_info["final_pt"]
+        if "raw_pt" in p_info:
+          item["partner_raw_pt"] = p_info["raw_pt"]
+
+      if is_pm0:
+        shimocha_items.sort(
+            key=lambda item: (
+                abs(int(item["final_pt"])),
+                (int(item["seat"]) - self.dealer_first_seat) % 4,
+            )
+        )
+        shimocha_items[0]["rank"] = 1
+        if abs(int(shimocha_items[1]["final_pt"])) == abs(
+            int(shimocha_items[0]["final_pt"])
+        ):
+          shimocha_items[1]["rank"] = 1
+        else:
+          shimocha_items[1]["rank"] = 2
+      else:
+        shimocha_items.sort(
+            key=lambda item: (
+                -int(item["raw_score"]),
+                (int(item["seat"]) - self.dealer_first_seat) % 4,
+            )
+        )
+        shimocha_items[0]["rank"] = 1
+        shimocha_items[1]["rank"] = 2
+      return shimocha_items
+
+    if is_pm0:
       standings.sort(
           key=lambda item: (
               abs(int(item["final_pt"])),
@@ -221,16 +314,25 @@ class MatchEngine:
     await self.ipc.start_all()
     try:
       for s in range(4):
-        match_start_msg = {
+        match_start_msg: dict[str, Any] = {
             "type": "match_start",
             "seat": s,
+            "target_seat": s,
             "dealer_first_seat": self.dealer_first_seat,
             "dice_seating": list(self.dice_seating),
             "timeout_sec": self.config.timeout_sec,
             "rules": self.rules.to_dict(),
         }
+        if self.rules.is_tag_mode:
+          match_start_msg["team"] = 0 if s in (0, 1) else 1
+          match_start_msg["role"] = "kamicha" if s in (0, 2) else "shimocha"
+          match_start_msg["partner_seat"] = (s + 1) if s in (0, 2) else (s - 1)
+          match_start_msg["controlled_seats"] = (
+              [0, 1] if s in (0, 1) else [2, 3]
+          )
         if s in self.clients:
           self.clients[s].match_start_msg = match_start_msg
+          self.clients[s].match_start_msgs.append(match_start_msg)
         await self.ipc.send_to(s, match_start_msg)
 
       wind_idx = 0  # 0: E, 1: S, 2: W
@@ -272,7 +374,7 @@ class MatchEngine:
             result_type=outcome.result_type,
             renchan=outcome.renchan,
         ):
-          if self.rules.tobi_enabled and any(sc < 0 for sc in self.scores):
+          if self._has_tobi():
             end_reason = "tobi"
           else:
             end_reason = "all_last"

@@ -82,15 +82,29 @@ class ClientConnection:
     self.proc: asyncio.subprocess.Process | None = None
     self._reader_task: asyncio.Task[None] | None = None
     self._stderr_task: asyncio.Task[None] | None = None
-    self._pending_seq: int | None = None
-    self._pending_future: asyncio.Future[dict[str, Any]] | None = None
+    self._pending_futures: dict[int, asyncio.Future[dict[str, Any]]] = {}
+    self._write_lock = asyncio.Lock()
     self._eof: bool = False
     self.match_start_msg: dict[str, Any] | None = None
+    self.match_start_msgs: list[dict[str, Any]] = []
+
+  def _fail_all_pending(self, reason: str) -> None:
+    for fut in list(self._pending_futures.values()):
+      if not fut.done():
+        fut.set_result({"_invalid": True, "_reason": reason})
+
+  def _fail_oldest_pending(self, reason: str) -> None:
+    for seq in sorted(self._pending_futures.keys()):
+      fut = self._pending_futures[seq]
+      if not fut.done():
+        fut.set_result({"_invalid": True, "_reason": reason})
+        return
 
   async def start(self) -> None:
     """Spawn the client subprocess with OS-scheduled CPUQuota and memory limits."""
     await self.stop()
     self._eof = False
+    self._pending_futures.clear()
     preexec = _make_preexec_fn(self.memory_limit_bytes)
     exec_cmd = list(self.cmd_list)
     if self.client_cpus > 0 and _can_use_systemd_cpu_quota():
@@ -123,7 +137,10 @@ class ClientConnection:
         or self._eof
     ):
       await self.start()
-      if self.match_start_msg is not None:
+      if self.match_start_msgs:
+        for msg in self.match_start_msgs:
+          await self.send(msg)
+      elif self.match_start_msg is not None:
         await self.send(self.match_start_msg)
 
   async def stop(self) -> None:
@@ -185,21 +202,14 @@ class ClientConnection:
           line_bytes = await self.proc.stdout.readline()
         except Exception as exc:  # pylint: disable=broad-except
           self._eof = True
-          if self._pending_future and not self._pending_future.done():
-            self._pending_future.set_result(
-                {"_invalid": True, "_reason": f"stdout read error: {exc}"}
-            )
+          self._fail_all_pending(f"stdout read error: {exc}")
           break
 
         if not line_bytes:
           self._eof = True
-          if self._pending_future and not self._pending_future.done():
-            self._pending_future.set_result(
-                {
-                    "_invalid": True,
-                    "_reason": "client process closed stdout (EOF/OOM/crash)",
-                }
-            )
+          self._fail_all_pending(
+              "client process closed stdout (EOF/OOM/crash)"
+          )
           break
 
         line_str = line_bytes.decode("utf-8", errors="replace").strip()
@@ -207,58 +217,46 @@ class ClientConnection:
           continue
 
         # If no request is currently awaiting a response from this client, ignore stray output
-        if self._pending_future is None or self._pending_future.done():
+        if not any(not f.done() for f in self._pending_futures.values()):
           continue
 
         try:
           parsed = json.loads(line_str)
         except json.JSONDecodeError as exc:
-          self._pending_future.set_result(
-              {"_invalid": True, "_reason": f"malformed JSON: {exc}"}
-          )
+          self._fail_oldest_pending(f"malformed JSON: {exc}")
           continue
 
         if not isinstance(parsed, dict):
-          self._pending_future.set_result(
-              {"_invalid": True, "_reason": "JSON response must be an object"}
-          )
+          self._fail_oldest_pending("JSON response must be an object")
           continue
 
         msg_seq = parsed.get("seq")
         if not isinstance(msg_seq, int) or isinstance(msg_seq, bool):
-          self._pending_future.set_result(
-              {
-                  "_invalid": True,
-                  "_reason": f"missing or non-integer seq: {msg_seq!r}",
-              }
+          self._fail_oldest_pending(
+              f"missing or non-integer seq: {msg_seq!r}"
           )
           continue
 
-        if self._pending_seq is not None:
-          if msg_seq < self._pending_seq:
-            # Stale response from an earlier timed-out turn; discard it
-            continue
-          if msg_seq != self._pending_seq:
-            self._pending_future.set_result(
-                {
-                    "_invalid": True,
-                    "_reason": (
-                        f"mismatched seq: expected {self._pending_seq}, got"
-                        f" {msg_seq}"
-                    ),
-                }
-            )
-            continue
+        active_seqs = [
+            s for s, f in self._pending_futures.items() if not f.done()
+        ]
+        if not active_seqs:
+          continue
 
-        self._pending_future.set_result(parsed)
+        if msg_seq in self._pending_futures and not self._pending_futures[msg_seq].done():
+          self._pending_futures[msg_seq].set_result(parsed)
+        elif msg_seq < min(active_seqs):
+          # Stale response from an earlier timed-out turn; discard it
+          continue
+        else:
+          self._fail_oldest_pending(
+              f"mismatched seq: expected {min(active_seqs)}, got {msg_seq}"
+          )
     except asyncio.CancelledError:
       raise
     except Exception as exc:  # pylint: disable=broad-except
       self._eof = True
-      if self._pending_future and not self._pending_future.done():
-        self._pending_future.set_result(
-            {"_invalid": True, "_reason": f"reader error: {exc}"}
-        )
+      self._fail_all_pending(f"reader error: {exc}")
 
   async def send(
       self, message: dict[str, Any], timeout_sec: float | None = None
@@ -269,8 +267,11 @@ class ClientConnection:
     t = self.send_timeout_sec if timeout_sec is None else timeout_sec
     try:
       data = (json.dumps(message, ensure_ascii=False) + "\n").encode("utf-8")
-      self.proc.stdin.write(data)
-      await asyncio.wait_for(self.proc.stdin.drain(), timeout=t)
+      async with self._write_lock:
+        if self.proc is None or self.proc.stdin is None or self._eof:
+          return False
+        self.proc.stdin.write(data)
+        await asyncio.wait_for(self.proc.stdin.drain(), timeout=t)
       return True
     except (
         BrokenPipeError,
@@ -287,22 +288,27 @@ class ClientConnection:
       return False
 
   async def request(
-      self, message: dict[str, Any], seq: int, timeout_sec: float
+      self,
+      message: dict[str, Any],
+      seq: int,
+      timeout_sec: float,
+      target_seat: int | None = None,
   ) -> ClientResponse:
     """Send a request with `seq` and wait up to `timeout_sec` for a response."""
+    res_seat = self.seat if target_seat is None else target_seat
     msg_with_seq = dict(message)
     msg_with_seq["seq"] = seq
+    if target_seat is not None:
+      msg_with_seq["target_seat"] = target_seat
 
     loop = asyncio.get_running_loop()
     fut: asyncio.Future[dict[str, Any]] = loop.create_future()
-    self._pending_seq = seq
-    self._pending_future = fut
+    self._pending_futures[seq] = fut
 
     if self._eof or not await self.send(msg_with_seq):
-      self._pending_future = None
-      self._pending_seq = None
+      self._pending_futures.pop(seq, None)
       return ClientResponse(
-          seat=self.seat,
+          seat=res_seat,
           is_invalid=True,
           error_reason="client disconnected or crashed before request",
       )
@@ -310,18 +316,17 @@ class ClientConnection:
     try:
       result = await asyncio.wait_for(fut, timeout=timeout_sec)
     except asyncio.TimeoutError:
-      return ClientResponse(seat=self.seat, timed_out=True)
+      return ClientResponse(seat=res_seat, timed_out=True)
     finally:
-      self._pending_future = None
-      self._pending_seq = None
+      self._pending_futures.pop(seq, None)
 
     if result.get("_invalid"):
       return ClientResponse(
-          seat=self.seat,
+          seat=res_seat,
           is_invalid=True,
           error_reason=str(result.get("_reason", "invalid response")),
       )
-    return ClientResponse(seat=self.seat, data=result)
+    return ClientResponse(seat=res_seat, data=result)
 
 
 class IPCManager:
@@ -332,29 +337,44 @@ class IPCManager:
     self.timeout_sec = timeout_sec
     self._seq_counter = 0
 
+  def _unique_connections(
+      self, exclude_seat: int | None = None
+  ) -> list[ClientConnection]:
+    seen: set[int] = set()
+    unique: list[ClientConnection] = []
+    for s, conn in self.clients.items():
+      if s == exclude_seat:
+        continue
+      if id(conn) not in seen:
+        seen.add(id(conn))
+        unique.append(conn)
+    return unique
+
   def next_seq(self) -> int:
     self._seq_counter += 1
     return self._seq_counter
 
   async def start_all(self) -> None:
-    await asyncio.gather(*(c.start() for c in self.clients.values()))
+    await asyncio.gather(*(c.start() for c in self._unique_connections()))
 
   async def ensure_all_alive(self) -> None:
-    await asyncio.gather(*(c.ensure_alive() for c in self.clients.values()))
+    await asyncio.gather(
+        *(c.ensure_alive() for c in self._unique_connections())
+    )
 
   async def stop_all(self) -> None:
-    await asyncio.gather(*(c.stop() for c in self.clients.values()))
+    await asyncio.gather(*(c.stop() for c in self._unique_connections()))
 
   async def send_to(self, seat: int, message: dict[str, Any]) -> None:
-    await self.clients[seat].send(message)
+    msg = dict(message)
+    msg.setdefault("target_seat", seat)
+    await self.clients[seat].send(msg)
 
   async def broadcast(
       self, message: dict[str, Any], exclude_seat: int | None = None
   ) -> None:
     tasks = [
-        c.send(message)
-        for s, c in self.clients.items()
-        if s != exclude_seat
+        c.send(message) for c in self._unique_connections(exclude_seat)
     ]
     if tasks:
       await asyncio.gather(*tasks)
@@ -364,7 +384,9 @@ class IPCManager:
   ) -> ClientResponse:
     seq = self.next_seq()
     t = self.timeout_sec if timeout_sec is None else timeout_sec
-    return await self.clients[seat].request(message, seq=seq, timeout_sec=t)
+    return await self.clients[seat].request(
+        message, seq=seq, timeout_sec=t, target_seat=seat
+    )
 
   async def request_others_parallel(
       self,
@@ -373,11 +395,12 @@ class IPCManager:
       timeout_sec: float | None = None,
   ) -> dict[int, ClientResponse]:
     """Send `message` to all 3 seats other than `actor_seat` in parallel and wait up to `timeout_sec`."""
-    seq = self.next_seq()
     t = self.timeout_sec if timeout_sec is None else timeout_sec
     other_seats = [s for s in range(4) if s != actor_seat]
     coros = [
-        self.clients[s].request(message, seq=seq, timeout_sec=t)
+        self.clients[s].request(
+            message, seq=self.next_seq(), timeout_sec=t, target_seat=s
+        )
         for s in other_seats
     ]
     responses = await asyncio.gather(*coros)

@@ -1520,6 +1520,12 @@ class SimpleClient {
     return best_call;
   }
 
+ public:
+  const std::vector<std::string>& hand() const { return hand_; }
+  const std::vector<Meld>& melds() const { return melds_; }
+  int seat() const { return seat_; }
+  bool is_riichi() const { return is_riichi_; }
+
   json handle_message(const json& msg) {
     std::string msg_type = msg.value("type", "");
     int seq = msg.value("seq", 0);
@@ -1770,6 +1776,7 @@ class SimpleClient {
 
 }  // namespace mahjong
 
+#ifndef MAHJONG_CLIENT_LIBRARY
 int main(int argc, char** argv) {
   std::ios::sync_with_stdio(false);
   std::cin.tie(nullptr);
@@ -1788,3 +1795,4 @@ int main(int argc, char** argv) {
   client.run();
   return 0;
 }
+#endif  // MAHJONG_CLIENT_LIBRARY

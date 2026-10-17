@@ -21,10 +21,10 @@ This document specifies everything required to implement a compatible client for
   - **If you time out on a reaction query (`discard_notify` / `kakan_notify`)**: It is automatically treated as `{"action": "pass"}`.
 - **Sequence Number (`seq`) Synchronization**:
   - Every message that requires a reply contains an integer `"seq"` field.
-  - Your reply **must** echo the exact same `"seq"` as a **JSON integer** (e.g. `{"seq": 15, "action": ...}`). Missing `"seq"`, non-integer `"seq"` (such as `"15"` or `true`), or `"seq" > expected` is immediately penalized as **Chombo**.
+  - Your reply **must** echo the exact same `"seq"` as a **JSON integer** (e.g. `{"seq": 15, "action": ...}`). Missing `"seq"` or non-integer `"seq"` (such as `"15"` or `true`) is treated as an illegal response and ignored (sending an `error` message).
 
 ### 1.3 Message Ordering, Timeouts, and Process Restart Semantics
-- **Strict Sequential Request-Response**: You will never receive a new message while your reply to an Action Request is pending, *unless you timed out*.
+- **Strict Sequential Request-Response**: You will never receive a new message while your reply to an Action Request is pending, *unless you timed out* (or in 2v2 mode when both of your controlled seats are queried in parallel on an opponent's discard/kakan).
 - **Late Replies After Timeout**:
   - After a timeout on `turn_tsumo` or `turn_after_call`, the server has already acted for you and sends you `discard_ack` indicating which tile was auto-discarded.
   - Any late reply carrying an older `"seq" < current_pending_seq` is safely dropped by the server.
@@ -32,9 +32,29 @@ This document specifies everything required to implement a compatible client for
     - Timing out on `discard_notify` / `kakan_notify` when the tile is in your Tenpai wait set causes **Temporary Furiten (`同巡フリテン`)** (and **Permanent Post-Riichi Furiten** if you are in Riichi).
     - Timing out on `turn_tsumo` when the drawn tile was a winning tile causes it to be auto-discarded into your river, putting you in **Discard Furiten (`捨牌フリテン`)** (and **Permanent Post-Riichi Furiten** if in Riichi).
 - **Process Crash & Restart Behavior**:
-  - If your process crashes or closes `stdout` (EOF), it is penalized with Chombo and automatically respawned at the start of the next round.
-  - Upon respawn, the server immediately re-sends your `match_start` message followed by the new round's `round_start` message.
+  - If your process crashes or closes `stdout` (EOF), it is automatically respawned at the start of the next round.
+  - Upon respawn, the server immediately re-sends your `match_start` message(s) followed by the new round's `round_start` message(s).
   - Note: The server drains your `stderr` pipe asynchronously, so debug logging to `stderr` will not block your process.
+
+### 1.4 2v2 (Tag Match) Mode (`--tag` / `--2v2` or `rules.game_mode = "2v2"`)
+In **2v2 Tag Match** mode, only **2 client processes** are spawned (`Client A` and `Client B`), and each client controls **2 adjacent seats**:
+- **Team 0**: Seat `0` (**Kamicha / 上家**, immortal) and Seat `1` (**Shimocha / 下家**, ranked).
+- **Team 1**: Seat `2` (**Kamicha / 上家**, immortal) and Seat `3` (**Shimocha / 下家**, ranked).
+- **Double Resource Limits**: Because a single client process operates 2 players simultaneously, the default per-process resource limits are doubled to **`2` CPU cores** (`--client-cpus 2`) and **`8192 MB` (8 GB) memory** (`--client-memory-mb 8192`).
+- **Single Pipe with `"target_seat"` Multiplexing**:
+  - Each client process uses a single `stdin`/`stdout` JSON Lines pipe.
+  - Every per-seat message (`match_start`, `round_start`, `player_tsumo`, `discard_ack`, `error`, `turn_tsumo`, `turn_after_call`, `discard_notify`, `kakan_notify`) includes `"target_seat": <0..3>` identifying which of your two controlled seats is receiving the message.
+  - Notice that when an opponent discards a tile (`discard_notify`) or declares an added kan (`kakan_notify`), your client process will receive **two** action requests back-to-back (one with `"target_seat": seat_a, "seq": seq1` and one with `"target_seat": seat_b, "seq": seq2`). Your client must reply to **both** requests by echoing their respective `"seq"` integers (`{"seq": seq1, ...}` and `{"seq": seq2, ...}` in either order).
+  - Table-wide broadcast notifications (`dora_notify`, `riichi_accepted`, `call_notify`, `round_end`, `match_end`) do not have `"target_seat"` and apply to the whole table (you only receive one copy per broadcast).
+  - Because both of your team's seats run inside the same process, they can freely share hand visibility and coordinate tile feeding (e.g., Kamicha feeding Chi/Pon/Ron tiles to Shimocha).
+- **2v2 Game Rules**:
+  1. **Immortal Kamicha (上家不死)**: Seats `0` and `2` (the Kamicha of each team) **cannot die (no Tobi)** — even if Seat `0` or Seat `2` drops below `0` points (`< 0`), the match continues! Only if a **Shimocha** player (Seat `1` or Seat `3`) finishes a round with `< 0` points does `飛び終了` (Tobi) occur.
+  2. **Riichi Point Requirement for Kamicha (`>= 1000` Required)**: Even though Kamicha seats (`0` and `2`) can play on with `< 1000` or negative points, **they CANNOT declare Riichi when their score is `< 1000` (including negative scores)**. All 4 seats must have `points[seat] >= 1000` to declare `"riichi"`; attempting to declare Riichi with `< 1000` points is rejected with an `error` message and ignored (falling back to auto-tsumogiri).
+  3. **4-Player Uma/Oka Settlement + Shimocha-Only Final Ranking**:
+     - At the end of the match, standard 4-player Uma (`+20 / +10 / -10 / -20`) and Oka (`+20` to 1st place) are calculated across all 4 seats (`0, 1, 2, 3`) as usual.
+     - **Final Ranking (`final_results`)**: Only the two **Shimocha** seats (Seat `1` and Seat `3`) are compared and ranked against each other (`rank 1` and `rank 2`, or tied `1, 1` in `"plus_minus_zero"` mode). Each entry in `final_results` also records `"partner_seat"`, `"partner_raw_score"`, and `"partner_final_pt"`.
+  4. **Compatible with `"plus_minus_zero"` (`"正負0"`)**: When both `game_mode = "2v2"` and `ranking_mode = "plus_minus_zero"` are enabled, the 4-player post-Uma/Oka points are rounded via Gosha-Rokuiri (`五捨六入`), and the two Shimocha players (`Seat 1` and `Seat 3`) are ranked by `abs(final_pt)` ascending (closest to `0` wins).
+- **Reference C++20 Tag Client**: See [`client/tag_client.cpp`](file:///usr/local/google/home/phoenixshen/temp/mj/client/tag_client.cpp) (compiled to `client/tag_client` via `make`).
 
 ---
 
@@ -364,7 +384,7 @@ Sent when you draw a tile from the live wall or dead wall (Rinshan).
 | Action | JSON Format | When Legal |
 | :--- | :--- | :--- |
 | **Discard** | `{"seq": 15, "action": "discard", "tile": "7z"}` | `"tile"` must be in `hand + [drawn_tile]`. If you are already in Riichi, `"tile"` **must** equal the just-drawn `drawn_tile` (tsumogiri). |
-| **Riichi** | `{"seq": 15, "action": "riichi", "tile": "7z"}` | Must not already be in Riichi; must be **Menzen** (no open `chi`/`pon`/`daiminkan` melds; `ankan` is allowed); your current score must be `>= 1000`; `remaining_tiles >= 4`; `"tile"` must be in `hand + [drawn_tile]`. *(See Section 5.3 on Noten Riichi.)* |
+| **Riichi** | `{"seq": 15, "action": "riichi", "tile": "7z"}` | Must not already be in Riichi; must be **Menzen** (no open `chi`/`pon`/`daiminkan` melds; `ankan` is allowed); your current score must be `>= 1000` (applies to all seats, including immortal Kamicha in 2v2 mode — negative or `< 1000` points cannot declare Riichi); `remaining_tiles >= 4`; `"tile"` must be in `hand + [drawn_tile]`. *(See Section 5.3 on Noten Riichi.)* |
 | **Tsumo Win** | `{"seq": 15, "action": "tsumo"}` | `hand + [drawn_tile]` + your melds must form a complete winning hand with `>= 1` han of non-bonus yaku (or Yakuman). |
 | **Ankan (暗槓)** | `{"seq": 15, "action": "ankan", "tile": "1z"}` | `remaining_tiles > 0`; fewer than 4 kans total have been declared in the round; `hand + [drawn_tile]` contains all 4 copies of `"tile"`. If in Riichi, see strict Riichi Ankan rules in Section 5.4. |
 | **Kakan (加槓)** | `{"seq": 15, "action": "kakan", "tile": "0p"}` | Not in Riichi; `remaining_tiles > 0`; fewer than 4 kans total in the round; `"tile"` is in `hand + [drawn_tile]`; you have an existing `"pon"` meld of the same tile kind. |
