@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 import json
 import os
+import random
 import resource
 import shlex
 from typing import Any
@@ -33,19 +34,40 @@ def _make_preexec_fn(
   return _apply_limits
 
 
-def get_assigned_cpus_for_seat(seat: int, num_cpus: int) -> set[int]:
-  """Select a subset of `num_cpus` logical CPU cores for `seat`."""
-  if num_cpus <= 0:
-    return set()
+def get_available_cpus() -> list[int]:
+  """Return sorted list of available logical CPU indices (0 ~ nproc-1)."""
   try:
     avail = sorted(os.sched_getaffinity(0))
   except AttributeError:
     avail = list(range(os.cpu_count() or 1))
-  if not avail:
-    return set()
+  return avail or [0]
+
+
+def sample_cpus_for_seats(
+    num_seats: int = 4, num_cpus: int = 1
+) -> dict[int, set[int]]:
+  """Randomly select distinct CPU indices (from 0 ~ nproc-1) for each seat."""
+  if num_cpus <= 0:
+    return {s: set() for s in range(num_seats)}
+  avail = list(get_available_cpus())
+  sys_rng = random.SystemRandom()
+  sys_rng.shuffle(avail)
   count = min(num_cpus, len(avail))
-  start = (seat * count) % len(avail)
-  return {avail[(start + i) % len(avail)] for i in range(count)}
+  result: dict[int, set[int]] = {}
+  for s in range(num_seats):
+    start = (s * count) % len(avail)
+    result[s] = {avail[(start + i) % len(avail)] for i in range(count)}
+  return result
+
+
+def get_assigned_cpus_for_seat(seat: int, num_cpus: int) -> set[int]:
+  """Randomly select `num_cpus` logical CPU cores for a single seat."""
+  del seat
+  if num_cpus <= 0:
+    return set()
+  avail = get_available_cpus()
+  count = min(num_cpus, len(avail))
+  return set(random.SystemRandom().sample(avail, count))
 
 
 @dataclass
@@ -70,6 +92,7 @@ class ClientConnection:
       client_memory_mb: int = 4096,
       send_timeout_sec: float = 2.0,
       stderr_log_path: str | None = None,
+      assigned_cpus: set[int] | None = None,
   ) -> None:
     self.seat = seat
     self.cmd_list = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
@@ -78,7 +101,11 @@ class ClientConnection:
     self.client_memory_mb = client_memory_mb
     self.send_timeout_sec = send_timeout_sec
     self.stderr_log_path = stderr_log_path
-    self.assigned_cpus = get_assigned_cpus_for_seat(seat, client_cpus)
+    self.assigned_cpus = (
+        set(assigned_cpus)
+        if assigned_cpus is not None
+        else get_assigned_cpus_for_seat(seat, client_cpus)
+    )
     self.memory_limit_bytes = client_memory_mb * 1024 * 1024
 
     self.proc: asyncio.subprocess.Process | None = None

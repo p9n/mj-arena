@@ -778,7 +778,8 @@ function loadPaifuObject(data) {
   const rawMode = (data.rules && data.rules.ranking_mode) || "normal";
   const isPm0 = rawMode === "plus_minus_zero" || rawMode === "正負0" || rawMode === "pm0";
   const modeLabel = isPm0 ? "正負0" : "一般";
-  document.getElementById("match-id-badge").textContent = `Match: ${data.match_id || "Loaded"} (${modeLabel})`;
+  const seedTag = data.seed !== undefined && data.seed !== null ? ` | Seed: ${data.seed}` : "";
+  document.getElementById("match-id-badge").textContent = `Match: ${data.match_id || "Loaded"}${seedTag} (${modeLabel})`;
 
   // Update player executable names on seat headers
   for (let s = 0; s < 4; s++) {

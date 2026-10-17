@@ -334,6 +334,7 @@ flowchart TD
 ```json
 {
   "match_id": "20261017-172000",
+  "seed": 42,
   "seating": [
     {"seat": 0, "client_cmd": "python3 client/simple_client.py", "initial_east_order": 2},
     {"seat": 1, "client_cmd": "python3 client/simple_client.py", "initial_east_order": 3},

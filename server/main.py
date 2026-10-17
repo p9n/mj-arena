@@ -89,18 +89,25 @@ async def async_main(argv: list[str] | None = None) -> int:
       4 - len(provided_clients)
   )
 
-  rng = random.Random(args.seed)
+  seed = (
+      args.seed
+      if args.seed is not None
+      else random.SystemRandom().randint(0, 2**32 - 1)
+  )
+  rng = random.Random(seed)
   engine = MatchEngine(
       config=config,
       client_cmds=client_cmds,
       rng=rng,
       paifu_path=args.paifu,
+      seed=seed,
   )
   paifu_data = await engine.run_match()
   print(
       json.dumps(
           {
               "match_id": paifu_data["match_id"],
+              "seed": paifu_data["seed"],
               "rounds_played": len(paifu_data["rounds"]),
               "final_results": paifu_data["final_results"],
               "paifu_path": args.paifu,

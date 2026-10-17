@@ -44,10 +44,12 @@ class IntegrationTest(unittest.TestCase):
             client_cmds=[cmd] * 4,
             rng=random.Random(42),
             paifu_path=str(paifu_path),
+            seed=42,
         )
         result = await engine.run_match()
         self.assertTrue(paifu_path.exists())
         saved = json.loads(paifu_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["seed"], 42)
         has_tobi = any(item["raw_score"] < 0 for item in saved["final_results"])
         if not has_tobi:
           self.assertGreaterEqual(len(saved["rounds"]), 8)

@@ -7,7 +7,7 @@ import random
 from typing import Any
 
 from server.config import ServerConfig
-from server.ipc import ClientConnection, IPCManager
+from server.ipc import ClientConnection, IPCManager, sample_cpus_for_seats
 from server.paifu import PaifuRecorder
 from server.round_engine import RoundEngine
 
@@ -31,12 +31,21 @@ class MatchEngine:
       client_cmds: list[str | list[str]],
       rng: random.Random | None = None,
       paifu_path: str | None = None,
+      seed: int | None = None,
   ) -> None:
     if len(client_cmds) != 4:
       raise ValueError(f"Expected 4 client commands, got {len(client_cmds)}")
     self.config = config
     self.rules = config.rules
-    self.rng = rng or random.Random()
+    if seed is not None:
+      self.seed: int | None = seed
+      self.rng = rng or random.Random(seed)
+    elif rng is None:
+      self.seed = random.SystemRandom().randint(0, 2**32 - 1)
+      self.rng = random.Random(self.seed)
+    else:
+      self.seed = None
+      self.rng = rng
     self.paifu_path = paifu_path
 
     # Randomly assign the 4 client processes to seats 0, 1, 2, 3
@@ -45,6 +54,7 @@ class MatchEngine:
 
     self.seating_info: list[dict[str, Any]] = []
     self.clients: dict[int, ClientConnection] = {}
+    seat_cpus = sample_cpus_for_seats(num_seats=4, num_cpus=config.client_cpus)
     for seat, (orig_idx, cmd) in enumerate(indexed_cmds):
       stderr_log_path = None
       if config.client_log_dir:
@@ -56,6 +66,7 @@ class MatchEngine:
           client_memory_mb=config.client_memory_mb,
           send_timeout_sec=min(2.0, config.timeout_sec),
           stderr_log_path=stderr_log_path,
+          assigned_cpus=seat_cpus[seat],
       )
       self.clients[seat] = conn
       self.seating_info.append(
@@ -85,6 +96,7 @@ class MatchEngine:
         dice_seating=self.dice_seating,
         dealer_first_seat=self.dealer_first_seat,
         rules_dict=self.rules.to_dict(),
+        seed=self.seed,
     )
 
     self.scores: list[int] = [self.rules.start_points] * 4

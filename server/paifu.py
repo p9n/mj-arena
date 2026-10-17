@@ -59,8 +59,10 @@ class PaifuRecorder:
       dice_seating: tuple[int, int],
       dealer_first_seat: int,
       rules_dict: dict[str, Any],
+      seed: int | None = None,
   ) -> None:
     self.match_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    self.seed = seed
     self.seating_info = seating_info
     self.dice_seating = list(dice_seating)
     self.dealer_first_seat = dealer_first_seat
@@ -106,6 +108,7 @@ class PaifuRecorder:
   def to_dict(self) -> dict[str, Any]:
     return {
         "match_id": self.match_id,
+        "seed": self.seed,
         "notation": "MPSZ (0m/0p/0s for red fives, 1z-7z for E/S/W/N/P/F/C)",
         "seating": self.seating_info,
         "dice_seating": self.dice_seating,
