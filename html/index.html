@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="Japanese Mahjong (Tenhou Rules) MPSZ Paifu Replay Viewer with step-by-step navigation and 1-second autoplay." />
+  <title>日本麻將牌譜重播器 (MPSZ Replay Viewer)</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <h1>🀄 日本麻將牌譜重播器</h1>
+      <span id="match-id-badge" class="match-badge">載入 paifu.json 中...</span>
+    </div>
+
+    <div class="controls-bar">
+      <label for="round-select" style="font-size:0.82rem;color:var(--text-secondary);">局數：</label>
+      <select id="round-select" aria-label="選擇局數"></select>
+
+      <button id="btn-first" type="button" title="回到本局開頭">|&lt; 開局</button>
+      <button id="btn-prev" type="button" title="上一手 (Left Arrow)">◀ 上一手</button>
+      <button id="btn-autoplay" type="button" class="btn-primary" title="自動播放 1秒/步 (Space)">▶ Autoplay (1s)</button>
+      <button id="btn-next" type="button" title="下一手 (Right Arrow)">下一手 ▶</button>
+      <button id="btn-last" type="button" title="跳至本局結算">結算 &gt;|</button>
+
+      <div class="step-scrubber">
+        <input id="step-slider" type="range" min="0" max="0" value="0" aria-label="步驟進度條" />
+        <span id="step-counter" class="step-counter">0 / 0</span>
+      </div>
+
+      <label class="file-label" title="手動選擇牌譜 JSON 檔案">
+        📂 載入牌譜 JSON
+        <input id="file-input" type="file" accept=".json,application/json" style="display:none;" />
+      </label>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <!-- Mahjong Table -->
+    <section class="table-container" aria-label="麻將牌桌">
+      <!-- Seat 2 (Top / Toimen of Seat 0) -->
+      <div id="seat-zone-2" class="seat-zone seat-top">
+        <div class="seat-header">
+          <div class="seat-id-group">
+            <span id="seat-wind-2" class="wind-badge">西</span>
+            <strong id="seat-name-2">simple_client.py</strong>
+            <span id="seat-riichi-2" class="riichi-pill" style="display:none;">立直</span>
+          </div>
+          <span id="seat-score-2" class="seat-score">25,000</span>
+        </div>
+        <div class="hand-row">
+          <div id="seat-hand-2" class="closed-hand"></div>
+          <div id="seat-melds-2" class="melds-group"></div>
+        </div>
+      </div>
+
+      <!-- Seat 3 (Left / Kamicha of Seat 0) -->
+      <div id="seat-zone-3" class="seat-zone seat-left">
+        <div class="seat-header">
+          <div class="seat-id-group">
+            <span id="seat-wind-3" class="wind-badge">北</span>
+            <strong id="seat-name-3">simple_client.py</strong>
+            <span id="seat-riichi-3" class="riichi-pill" style="display:none;">立直</span>
+          </div>
+          <span id="seat-score-3" class="seat-score">25,000</span>
+        </div>
+        <div class="hand-row">
+          <div id="seat-hand-3" class="closed-hand"></div>
+          <div id="seat-melds-3" class="melds-group"></div>
+        </div>
+      </div>
+
+      <!-- Center Arena (Rivers + HUD) -->
+      <div class="center-arena">
+        <div id="river-2" class="river-box river-top" title="對家 河"></div>
+        <div id="river-3" class="river-box river-left" title="上家 河"></div>
+
+        <div class="center-hud">
+          <div class="hud-top-row">
+            <span id="hud-round-title" class="round-title">東1局</span>
+            <span id="hud-wall-remain" class="wall-remain">残 70</span>
+          </div>
+          <div class="hud-counters">
+            <span id="hud-honba" style="display:none;"></span>
+            <span id="hud-kyoutaku">供託 0</span>
+            <span id="hud-dice">🎲 1+1=2</span>
+          </div>
+          <div class="dora-rack">
+            <span class="dora-label">ドラ表示牌 (Dora Indicators)</span>
+            <div id="hud-dora-tiles" class="dora-tiles"></div>
+          </div>
+        </div>
+
+        <div id="river-1" class="river-box river-right" title="下家 河"></div>
+        <div id="river-0" class="river-box river-bottom" title="自家 河"></div>
+      </div>
+
+      <!-- Seat 1 (Right / Shimocha of Seat 0) -->
+      <div id="seat-zone-1" class="seat-zone seat-right">
+        <div class="seat-header">
+          <div class="seat-id-group">
+            <span id="seat-wind-1" class="wind-badge">南</span>
+            <strong id="seat-name-1">simple_client.py</strong>
+            <span id="seat-riichi-1" class="riichi-pill" style="display:none;">立直</span>
+          </div>
+          <span id="seat-score-1" class="seat-score">25,000</span>
+        </div>
+        <div class="hand-row">
+          <div id="seat-hand-1" class="closed-hand"></div>
+          <div id="seat-melds-1" class="melds-group"></div>
+        </div>
+      </div>
+
+      <!-- Seat 0 (Bottom) -->
+      <div id="seat-zone-0" class="seat-zone seat-bottom">
+        <div class="seat-header">
+          <div class="seat-id-group">
+            <span id="seat-wind-0" class="wind-badge dealer">東</span>
+            <strong id="seat-name-0">simple_client.py</strong>
+            <span id="seat-riichi-0" class="riichi-pill" style="display:none;">立直</span>
+          </div>
+          <span id="seat-score-0" class="seat-score">25,000</span>
+        </div>
+        <div class="hand-row">
+          <div id="seat-hand-0" class="closed-hand"></div>
+          <div id="seat-melds-0" class="melds-group"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Right Sidebar -->
+    <aside class="sidebar">
+      <div class="panel-card">
+        <h2>當前動作 (Current Step)</h2>
+        <div id="action-banner" class="current-action-banner">請載入牌譜</div>
+        <div id="round-result-box" class="result-box"></div>
+        <div class="kbd-hint">快捷鍵：<code>←</code> 上一手 ｜ <code>→</code> 下一手 ｜ <code>Space</code> 自動播放</div>
+      </div>
+
+      <div class="panel-card">
+        <h2>本局步驟記錄 (Step Log)</h2>
+        <div id="event-list" class="event-list"></div>
+      </div>
+
+      <div class="panel-card">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+          <h2 style="margin:0;">半莊最終排名 (Final Standings)</h2>
+          <select id="ranking-mode-select" aria-label="排名模式" style="font-size:0.75rem;padding:2px 6px;">
+            <option value="normal">一般模式</option>
+            <option value="plus_minus_zero">正負0模式 (五捨六入)</option>
+          </select>
+        </div>
+        <table class="standings-table">
+          <thead>
+            <tr>
+              <th>名次</th>
+              <th>玩家</th>
+              <th>最終點數</th>
+              <th id="standings-pt-header">得點 (pt)</th>
+            </tr>
+          </thead>
+          <tbody id="standings-tbody"></tbody>
+        </table>
+      </div>
+    </aside>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

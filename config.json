@@ -1,0 +1,21 @@
+{
+  "timeout_sec": 5.0,
+  "rules": {
+    "ranking_mode": "plus_minus_zero",
+    "kuitan": true,
+    "aka_dora": true,
+    "start_points": 25000,
+    "return_points": 30000,
+    "uma": [20, 10, -10, -20],
+    "tobi_enabled": true,
+    "west_sudden_death": true,
+    "nagashi_mangan": true,
+    "double_ron": true,
+    "triple_ron_draw": true,
+    "pao_daisangen": true,
+    "pao_daisuushii": true,
+    "pao_suukantsu": false,
+    "noten_riichi_chombo_on_draw": true
+  },
+  "local_yaku": {}
+}
