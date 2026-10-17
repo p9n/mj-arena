@@ -147,8 +147,8 @@
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
           <h2 style="margin:0;">半莊最終排名 (Final Standings)</h2>
           <select id="ranking-mode-select" aria-label="排名模式" style="font-size:0.75rem;padding:2px 6px;">
+            <option value="plus_minus_zero" selected>正負0模式 (五捨六入)</option>
             <option value="normal">一般模式</option>
-            <option value="plus_minus_zero">正負0模式 (五捨六入)</option>
           </select>
         </div>
         <table class="standings-table">
@@ -157,7 +157,7 @@
               <th>名次</th>
               <th>玩家</th>
               <th>最終點數</th>
-              <th id="standings-pt-header">得點 (pt)</th>
+              <th id="standings-pt-header">五捨六入 (原pt)</th>
             </tr>
           </thead>
           <tbody id="standings-tbody"></tbody>

@@ -144,8 +144,8 @@ class IntegrationTest(unittest.TestCase):
 
     asyncio.run(run_timeout_round())
 
-  def test_client_illegal_move_triggers_chombo_and_memory_limit(self) -> None:
-    """Verify illegal move (--mode chombo) and memory limit (--mode mem-hog) both trigger Chombo."""
+  def test_client_illegal_move_and_memory_limit_ignored(self) -> None:
+    """Verify illegal move (--mode chombo) and memory limit (--mode mem-hog) are ignored with auto-tsumogiri without Chombo."""
 
     async def run_chombo_and_mem_test() -> None:
       for mode in ("chombo", "mem-hog"):
@@ -178,12 +178,7 @@ class IntegrationTest(unittest.TestCase):
               rng=random.Random(10),
           )
           outcome = await r_engine.run()
-          self.assertEqual(outcome.result_type, "chombo")
-          offender = outcome.details["offender"]
-          if offender == 0:
-            self.assertEqual(outcome.scores_after[offender], 25000 - 12000)
-          else:
-            self.assertEqual(outcome.scores_after[offender], 25000 - 8000)
+          self.assertNotEqual(outcome.result_type, "chombo")
         finally:
           await engine.ipc.stop_all()
 

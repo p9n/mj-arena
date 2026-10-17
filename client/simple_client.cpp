@@ -1651,11 +1651,13 @@ class SimpleClient {
       }
       if (mode_ == "timeout" && !triggered_test_action_) {
         triggered_test_action_ = true;
+        hand_.push_back(drawn_tile);
         std::this_thread::sleep_for(std::chrono::milliseconds(6000));
         return {{"seq", seq}, {"action", "discard"}, {"tile", drawn_tile}};
       }
       if (mode_ == "chombo" && !triggered_test_action_) {
         triggered_test_action_ = true;
+        hand_.push_back(drawn_tile);
         return {{"seq", seq}, {"action", "discard"}, {"tile", "9z"}};
       }
 

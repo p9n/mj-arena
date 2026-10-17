@@ -183,6 +183,33 @@ class RoundEngine:
       if wind_melds == 4:
         p.pao_seats["大四喜"] = from_seat
 
+  async def _send_error(self, seat: int, reason: str) -> None:
+    """Send an error notification to `seat` when an illegal operation is ignored."""
+    await self.ipc.send_to(
+        seat,
+        {
+            "type": "error",
+            "seat": seat,
+            "message": reason,
+        },
+    )
+
+  def _fallback_discard_tile(
+      self,
+      player: PlayerRoundState,
+      drawn_token: str | None,
+      forbidden_discards: set[int],
+  ) -> str:
+    """Return the auto-tsumogiri tile (or rightmost legal tile after a meld call)."""
+    if drawn_token is not None:
+      return drawn_token
+    legal_candidates = [
+        t
+        for t in reversed(player.closed_tiles)
+        if token_to_kind34(t) not in forbidden_discards
+    ]
+    return legal_candidates[0] if legal_candidates else player.closed_tiles[-1]
+
   async def _trigger_chombo(
       self, offender_seat: int, reason: str
   ) -> RoundOutcome:
@@ -360,30 +387,23 @@ class RoundEngine:
         )
 
       # Evaluate player's turn response
+      turn_action_from_client = False
       if resp.is_invalid:
-        return await self._trigger_chombo(current_seat, resp.error_reason)
-
-      if resp.timed_out:
-        # Timeout: auto-tsumogiri if drawn_token exists, else rightmost legal tile
-        if drawn_token is not None:
-          action = "discard"
-          action_tile = drawn_token
-        else:
-          legal_candidates = [
-              t
-              for t in reversed(player.closed_tiles)
-              if token_to_kind34(t) not in forbidden_discards
-          ]
-          if not legal_candidates:
-            return await self._trigger_chombo(
-                current_seat, "no legal tile to discard after call"
-            )
-          action = "discard"
-          action_tile = legal_candidates[0]
+        await self._send_error(current_seat, resp.error_reason)
+        action = "discard"
+        action_tile = self._fallback_discard_tile(
+            player, drawn_token, forbidden_discards
+        )
+      elif resp.timed_out:
+        action = "discard"
+        action_tile = self._fallback_discard_tile(
+            player, drawn_token, forbidden_discards
+        )
       else:
         assert resp.data is not None
         action = str(resp.data.get("action", ""))
         action_tile = str(resp.data.get("tile", ""))
+        turn_action_from_client = True
 
       # --- Process Active Turn Action ---
       is_first_turn_for_player = (
@@ -392,419 +412,265 @@ class RoundEngine:
 
       if action == "tsumo":
         if not need_draw or drawn_token is None:
-          return await self._trigger_chombo(
+          await self._send_error(
               current_seat, "cannot declare tsumo after a meld call"
           )
-        win_ctx = WinContext(
-            is_tsumo=True,
-            winning_token=drawn_token,
-            seat_wind_kind34=player.seat_wind_kind34,
-            round_wind_kind34=self.round_wind_kind34,
-            is_dealer=(current_seat == self.dealer_seat),
-            is_riichi=player.is_riichi,
-            is_double_riichi=player.is_double_riichi,
-            is_ippatsu=player.is_ippatsu,
-            is_rinshan=is_rinshan_draw,
-            is_chankan=False,
-            is_haitei=(
-                self.wall.remaining_tiles == 0 and not is_rinshan_draw
-            ),
-            is_houtei=False,
-            is_first_uncalled_turn=is_first_turn_for_player,
-            dora_indicators=self.wall.dora_indicators,
-            ura_dora_indicators=self.wall.ura_dora_indicators,
-            rules=self.rules,
-            local_yaku_enabled=self.config.local_yaku,
-            pao_seats=player.pao_seats,
-        )
-        agari = evaluate_agari(player.closed_tiles, player.melds, win_ctx)
-        if not agari.is_valid:
-          return await self._trigger_chombo(
-              current_seat, "invalid tsumo declaration (no yaku or not agari)"
+          action = "discard"
+          action_tile = self._fallback_discard_tile(
+              player, drawn_token, forbidden_discards
           )
-        return await self._finish_tsumo(current_seat, drawn_token, agari)
+          turn_action_from_client = False
+        else:
+          win_ctx = WinContext(
+              is_tsumo=True,
+              winning_token=drawn_token,
+              seat_wind_kind34=player.seat_wind_kind34,
+              round_wind_kind34=self.round_wind_kind34,
+              is_dealer=(current_seat == self.dealer_seat),
+              is_riichi=player.is_riichi,
+              is_double_riichi=player.is_double_riichi,
+              is_ippatsu=player.is_ippatsu,
+              is_rinshan=is_rinshan_draw,
+              is_chankan=False,
+              is_haitei=(
+                  self.wall.remaining_tiles == 0 and not is_rinshan_draw
+              ),
+              is_houtei=False,
+              is_first_uncalled_turn=is_first_turn_for_player,
+              dora_indicators=self.wall.dora_indicators,
+              ura_dora_indicators=self.wall.ura_dora_indicators,
+              rules=self.rules,
+              local_yaku_enabled=self.config.local_yaku,
+              pao_seats=player.pao_seats,
+          )
+          agari = evaluate_agari(player.closed_tiles, player.melds, win_ctx)
+          if not agari.is_valid:
+            await self._send_error(
+                current_seat, "invalid tsumo declaration (no yaku or not agari)"
+            )
+            action = "discard"
+            action_tile = self._fallback_discard_tile(
+                player, drawn_token, forbidden_discards
+            )
+            turn_action_from_client = False
+          else:
+            return await self._finish_tsumo(current_seat, drawn_token, agari)
 
       elif action == "kyuushu":
         if not need_draw or drawn_token is None or not is_first_turn_for_player:
-          return await self._trigger_chombo(
+          await self._send_error(
               current_seat,
               "kyuushu kyuuhai only allowed on first uncalled turn",
           )
-        hand14 = player.closed_tiles + [drawn_token]
-        yaochuu_types = {
-            token_to_kind34(t)
-            for t in hand14
-            if token_to_kind34(t) in YAOCHUU_KINDS
-        }
-        if len(yaochuu_types) < 9:
-          return await self._trigger_chombo(
-              current_seat,
-              f"kyuushu kyuuhai requires >= 9 yaochuu types, got {len(yaochuu_types)}",
+          action = "discard"
+          action_tile = self._fallback_discard_tile(
+              player, drawn_token, forbidden_discards
           )
-        player.closed_tiles.append(drawn_token)
-        player.sort_hand()
-        return await self._finish_abortive_draw(
-            "ryuukyoku_kyuushu_kyuuhai", actor_seat=current_seat
-        )
+          turn_action_from_client = False
+        else:
+          hand14 = player.closed_tiles + [drawn_token]
+          yaochuu_types = {
+              token_to_kind34(t)
+              for t in hand14
+              if token_to_kind34(t) in YAOCHUU_KINDS
+          }
+          if len(yaochuu_types) < 9:
+            await self._send_error(
+                current_seat,
+                f"kyuushu kyuuhai requires >= 9 yaochuu types, got {len(yaochuu_types)}",
+            )
+            action = "discard"
+            action_tile = self._fallback_discard_tile(
+                player, drawn_token, forbidden_discards
+            )
+            turn_action_from_client = False
+          else:
+            player.closed_tiles.append(drawn_token)
+            player.sort_hand()
+            return await self._finish_abortive_draw(
+                "ryuukyoku_kyuushu_kyuuhai", actor_seat=current_seat
+            )
 
       elif action == "ankan":
+        ankan_err: str | None = None
+        matching_tiles: list[str] = []
+        kan_kind: int = -1
+        full_14: list[str] = []
         if (
             not need_draw
             or drawn_token is None
             or not is_valid_token(action_tile)
         ):
-          return await self._trigger_chombo(
-              current_seat, "invalid ankan declaration"
+          ankan_err = "invalid ankan declaration"
+        elif len(self.kans_by_seat) >= 4 or self.wall.remaining_tiles == 0:
+          ankan_err = (
+              "cannot declare ankan when 4 kans already exist or wall is empty"
           )
-        if len(self.kans_by_seat) >= 4 or self.wall.remaining_tiles == 0:
-          return await self._trigger_chombo(
-              current_seat,
-              "cannot declare ankan when 4 kans already exist or wall is empty",
-          )
-        kan_kind = token_to_kind34(action_tile)
-        full_14 = player.closed_tiles + [drawn_token]
-        matching_tiles = [
-            t for t in full_14 if token_to_kind34(t) == kan_kind
-        ]
-        if len(matching_tiles) != 4:
-          return await self._trigger_chombo(
-              current_seat,
-              f"ankan requires 4 copies of {action_tile}, found {len(matching_tiles)}",
-          )
-        if player.is_riichi:
-          if not can_ankan_in_riichi(
+        else:
+          kan_kind = token_to_kind34(action_tile)
+          full_14 = player.closed_tiles + [drawn_token]
+          matching_tiles = [
+              t for t in full_14 if token_to_kind34(t) == kan_kind
+          ]
+          if len(matching_tiles) != 4:
+            ankan_err = (
+                f"ankan requires 4 copies of {action_tile}, found {len(matching_tiles)}"
+            )
+          elif player.is_riichi and not can_ankan_in_riichi(
               player.closed_tiles, drawn_token, player.melds, action_tile
           ):
-            return await self._trigger_chombo(
-                current_seat,
-                "illegal ankan in riichi (changes waits, okurikan, or not tenpai)",
+            ankan_err = (
+                "illegal ankan in riichi (changes waits, okurikan, or not tenpai)"
             )
 
-        # Execute Ankan
-        player.closed_tiles = sort_tokens(
-            t for t in full_14 if token_to_kind34(t) != kan_kind
-        )
-        meld = Meld(meld_type="ankan", tiles=sort_tokens(matching_tiles))
-        player.melds.append(meld)
-        self.kans_by_seat.append(current_seat)
+        if ankan_err is not None:
+          await self._send_error(current_seat, ankan_err)
+          action = "discard"
+          action_tile = self._fallback_discard_tile(
+              player, drawn_token, forbidden_discards
+          )
+          turn_action_from_client = False
+        else:
+          # Execute Ankan
+          player.closed_tiles = sort_tokens(
+              t for t in full_14 if token_to_kind34(t) != kan_kind
+          )
+          meld = Meld(meld_type="ankan", tiles=sort_tokens(matching_tiles))
+          player.melds.append(meld)
+          self.kans_by_seat.append(current_seat)
 
-        # Clear first round & ippatsu for all players
-        self.uncalled_first_round = False
-        for p in self.players.values():
-          p.is_ippatsu = False
+          # Clear first round & ippatsu for all players
+          self.uncalled_first_round = False
+          for p in self.players.values():
+            p.is_ippatsu = False
 
-        self.round_log.add_event(
-            {
-                "type": "ankan",
-                "seat": current_seat,
-                "tiles": list(meld.tiles),
-                "mpsz": meld.to_mpsz(),
-            }
-        )
-        await self.ipc.broadcast(
-            {"type": "call_notify", "seat": current_seat, **meld.to_dict()}
-        )
+          self.round_log.add_event(
+              {
+                  "type": "ankan",
+                  "seat": current_seat,
+                  "tiles": list(meld.tiles),
+                  "mpsz": meld.to_mpsz(),
+              }
+          )
+          await self.ipc.broadcast(
+              {"type": "call_notify", "seat": current_seat, **meld.to_dict()}
+          )
 
-        # Flush any deferred kandora from a previous kan in a consecutive kan sequence,
-        # then immediately reveal the Ankan's own kandora (暗槓は即乗り)
-        deferred = self.wall.flush_deferred_kandora()
-        imm_ind = self.wall.reveal_immediate_kandora()
-        await self._broadcast_new_dora(deferred + [imm_ind])
+          # Flush any deferred kandora from a previous kan in a consecutive kan sequence,
+          # then immediately reveal the Ankan's own kandora (暗槓は即乗り)
+          deferred = self.wall.flush_deferred_kandora()
+          imm_ind = self.wall.reveal_immediate_kandora()
+          await self._broadcast_new_dora(deferred + [imm_ind])
 
-        # Draw Rinshan tile on next loop iteration
-        need_draw = True
-        is_rinshan_draw = True
-        forbidden_discards = set()
-        continue
+          # Draw Rinshan tile on next loop iteration
+          need_draw = True
+          is_rinshan_draw = True
+          forbidden_discards = set()
+          continue
 
       elif action == "kakan":
+        kakan_err: str | None = None
+        full_14 = (
+            player.closed_tiles + [drawn_token]
+            if (need_draw and drawn_token is not None)
+            else []
+        )
+        pon_idx: int | None = None
         if (
             not need_draw
             or drawn_token is None
             or player.is_riichi
             or not is_valid_token(action_tile)
         ):
-          return await self._trigger_chombo(
-              current_seat, "invalid kakan declaration"
+          kakan_err = "invalid kakan declaration"
+        elif len(self.kans_by_seat) >= 4 or self.wall.remaining_tiles == 0:
+          kakan_err = (
+              "cannot declare kakan when 4 kans already exist or wall is empty"
           )
-        if len(self.kans_by_seat) >= 4 or self.wall.remaining_tiles == 0:
-          return await self._trigger_chombo(
-              current_seat,
-              "cannot declare kakan when 4 kans already exist or wall is empty",
-          )
-        full_14 = player.closed_tiles + [drawn_token]
-        if action_tile not in full_14:
-          return await self._trigger_chombo(
-              current_seat, f"kakan tile {action_tile} not in hand"
-          )
-        kan_kind = token_to_kind34(action_tile)
-        pon_idx = next(
-            (
-                i
-                for i, m in enumerate(player.melds)
-                if m.meld_type == "pon"
-                and token_to_kind34(m.tiles[0]) == kan_kind
-            ),
-            None,
-        )
-        if pon_idx is None:
-          return await self._trigger_chombo(
-              current_seat, f"no matching pon meld for kakan {action_tile}"
-          )
-
-        # Remove 1 copy of action_tile from full_14 and upgrade the pon meld to kakan
-        full_14.remove(action_tile)
-        player.closed_tiles = sort_tokens(full_14)
-        old_pon = player.melds[pon_idx]
-        kakan_meld = Meld(
-            meld_type="kakan",
-            tiles=sort_tokens(old_pon.tiles + [action_tile]),
-            called_tile=action_tile,
-            from_seat=old_pon.from_seat,
-        )
-        player.melds[pon_idx] = kakan_meld
-
-        self.round_log.add_event(
-            {
-                "type": "kakan",
-                "seat": current_seat,
-                "tile": action_tile,
-                "tiles": list(kakan_meld.tiles),
-                "mpsz": kakan_meld.to_mpsz(),
-            }
-        )
-
-        # Ask other 3 players in parallel (up to timeout_sec) for Chankan (搶槓)
-        # Note: per tenhou-rules.txt:
-        # '純正巡消しは発声＆和了打診後（加槓のみ)、嶺上ツモの前'
-        # '※一発と槍槓（連続槓の１回目）は複合する'
-        chankan_resps = await self.ipc.request_others_parallel(
-            current_seat,
-            {
-                "type": "kakan_notify",
-                "seat": current_seat,
-                "tile": action_tile,
-            },
-        )
-        ron_seats: list[int] = []
-        for offset in (1, 2, 3):
-          s = (current_seat + offset) % 4
-          c_resp = chankan_resps[s]
-          if c_resp.is_invalid:
-            return await self._trigger_chombo(s, c_resp.error_reason)
-          if c_resp.timed_out or c_resp.data is None:
-            continue
-          r_act = str(c_resp.data.get("action", "pass"))
-          if r_act == "pass":
-            continue
-          if r_act != "ron":
-            return await self._trigger_chombo(
-                s, f"illegal response {r_act!r} to kakan_notify"
-            )
-          # Validate Chankan Ron
-          if self._is_furiten(s):
-            return await self._trigger_chombo(
-                s, "declared chankan ron while in furiten"
-            )
-          p_other = self.players[s]
-          win_ctx = WinContext(
-              is_tsumo=False,
-              winning_token=action_tile,
-              seat_wind_kind34=p_other.seat_wind_kind34,
-              round_wind_kind34=self.round_wind_kind34,
-              is_dealer=(s == self.dealer_seat),
-              is_riichi=p_other.is_riichi,
-              is_double_riichi=p_other.is_double_riichi,
-              is_ippatsu=p_other.is_ippatsu,
-              is_rinshan=False,
-              is_chankan=True,
-              is_haitei=False,
-              is_houtei=False,
-              is_first_uncalled_turn=False,
-              dora_indicators=self.wall.dora_indicators,
-              ura_dora_indicators=self.wall.ura_dora_indicators,
-              rules=self.rules,
-              local_yaku_enabled=self.config.local_yaku,
-              pao_seats=p_other.pao_seats,
-          )
-          agari = evaluate_agari(p_other.closed_tiles, p_other.melds, win_ctx)
-          if not agari.is_valid:
-            return await self._trigger_chombo(
-                s, "invalid chankan ron declaration"
-            )
-          ron_seats.append(s)
-
-        self._update_missed_win_furiten(
-            action_tile, current_seat, set(ron_seats)
-        )
-
-        if len(ron_seats) == 3 and self.rules.triple_ron_draw:
-          return await self._finish_abortive_draw(
-              "ryuukyoku_sanchahou",
-              actor_seat=current_seat,
-              extra={"ron_seats": ron_seats, "tile": action_tile},
-          )
-        if ron_seats:
-          return await self._finish_ron(
-              ron_seats,
-              loser_seat=current_seat,
-              winning_token=action_tile,
-              is_chankan=True,
-              is_houtei=False,
-          )
-
-        # Chankan passed! Clear ippatsu & first-round flags right before Rinshan draw
-        self.uncalled_first_round = False
-        for p in self.players.values():
-          p.is_ippatsu = False
-
-        await self.ipc.broadcast(
-            {"type": "call_notify", "seat": current_seat, **kakan_meld.to_dict()}
-        )
-
-        # Flush any previously queued deferred kandora right before subsequent Rinshan draw,
-        # then queue this Kakan's deferred kandora
-        prev_deferred = self.wall.flush_deferred_kandora()
-        if prev_deferred:
-          await self._broadcast_new_dora(prev_deferred)
-        self.wall.queue_deferred_kandora()
-        self.kans_by_seat.append(current_seat)
-
-        need_draw = True
-        is_rinshan_draw = True
-        forbidden_discards = set()
-        continue
-
-      elif action in ("discard", "riichi"):
-        declaring_riichi = action == "riichi"
-        if not is_valid_token(action_tile):
-          return await self._trigger_chombo(
-              current_seat, f"invalid discard tile token: {action_tile!r}"
-          )
-
-        if need_draw:
-          assert drawn_token is not None
-          full_hand = player.closed_tiles + [drawn_token]
+        elif action_tile not in full_14:
+          kakan_err = f"kakan tile {action_tile} not in hand"
         else:
-          full_hand = list(player.closed_tiles)
+          kan_kind = token_to_kind34(action_tile)
+          pon_idx = next(
+              (
+                  i
+                  for i, m in enumerate(player.melds)
+                  if m.meld_type == "pon"
+                  and token_to_kind34(m.tiles[0]) == kan_kind
+              ),
+              None,
+          )
+          if pon_idx is None:
+            kakan_err = f"no matching pon meld for kakan {action_tile}"
 
-        if action_tile not in full_hand:
-          return await self._trigger_chombo(
-              current_seat, f"discarded tile {action_tile} not in hand"
+        if kakan_err is not None or pon_idx is None:
+          await self._send_error(
+              current_seat, kakan_err or "invalid kakan declaration"
+          )
+          action = "discard"
+          action_tile = self._fallback_discard_tile(
+              player, drawn_token, forbidden_discards
+          )
+          turn_action_from_client = False
+        else:
+          # Remove 1 copy of action_tile from full_14 and upgrade the pon meld to kakan
+          full_14.remove(action_tile)
+          player.closed_tiles = sort_tokens(full_14)
+          old_pon = player.melds[pon_idx]
+          kakan_meld = Meld(
+              meld_type="kakan",
+              tiles=sort_tokens(old_pon.tiles + [action_tile]),
+              called_tile=action_tile,
+              from_seat=old_pon.from_seat,
+          )
+          player.melds[pon_idx] = kakan_meld
+
+          self.round_log.add_event(
+              {
+                  "type": "kakan",
+                  "seat": current_seat,
+                  "tile": action_tile,
+                  "tiles": list(kakan_meld.tiles),
+                  "mpsz": kakan_meld.to_mpsz(),
+              }
           )
 
-        # Check kuikae restriction after Chi/Pon
-        if not need_draw and token_to_kind34(action_tile) in forbidden_discards:
-          return await self._trigger_chombo(
+          # Ask other 3 players in parallel (up to timeout_sec) for Chankan (搶槓)
+          # Note: per tenhou-rules.txt:
+          # '純正巡消しは発声＆和了打診後（加槓のみ)、嶺上ツモの前'
+          # '※一発と槍槓（連続槓の１回目）は複合する'
+          chankan_resps = await self.ipc.request_others_parallel(
               current_seat,
-              f"discard of {action_tile} violates kuikae (喰い替えなし)",
+              {
+                  "type": "kakan_notify",
+                  "seat": current_seat,
+                  "tile": action_tile,
+              },
           )
-
-        # If already in riichi, must tsumogiri the drawn tile
-        if player.is_riichi:
-          if declaring_riichi:
-            return await self._trigger_chombo(
-                current_seat, "cannot declare riichi when already in riichi"
-            )
-          if action_tile != drawn_token:
-            return await self._trigger_chombo(
-                current_seat,
-                f"player in riichi must tsumogiri {drawn_token}, tried {action_tile}",
-            )
-
-        # If declaring riichi now, validate public riichi requirements
-        # Note (Option B): we do NOT check tenpai at declaration time;
-        # Noten Riichi is checked at exhaustive draw (荒牌平局)!
-        if declaring_riichi:
-          if not need_draw or not player.is_menzen:
-            return await self._trigger_chombo(
-                current_seat, "riichi requires menzen hand on a draw turn"
-            )
-          if self.scores[current_seat] < 1000:
-            return await self._trigger_chombo(
-                current_seat, "riichi requires at least 1000 points"
-            )
-          if self.wall.remaining_tiles < 4:
-            return await self._trigger_chombo(
-                current_seat,
-                "riichi requires at least 4 tiles remaining in live wall",
-            )
-
-        # Right before discarding: flush any deferred kandora from Daiminkan/Kakan
-        # ('明槓/加槓は後めくり（打牌または続く嶺上の直前）')
-        if self.wall.pending_kandora_count > 0:
-          newly_flipped = self.wall.flush_deferred_kandora()
-          if newly_flipped:
-            await self._broadcast_new_dora(newly_flipped)
-
-        is_tsumogiri = need_draw and (action_tile == drawn_token)
-        full_hand.remove(action_tile)
-        player.closed_tiles = sort_tokens(full_hand)
-        player.river.append(action_tile)
-
-        # Discarding clears temporary furiten (同巡振聴の解消は打牌時),
-        # and if already in riichi from a prior turn, clears ippatsu.
-        player.temp_furiten = False
-        if player.is_riichi:
-          player.is_ippatsu = False
-
-        self.round_log.add_event(
-            {
-                "type": "discard",
-                "seat": current_seat,
-                "tile": action_tile,
-                "tsumogiri": is_tsumogiri,
-                "riichi": declaring_riichi,
-            }
-        )
-
-        # Notify the discarder of their own discard (no response needed)
-        await self.ipc.send_to(
-            current_seat,
-            {
-                "type": "discard_ack",
-                "seat": current_seat,
-                "tile": action_tile,
-                "is_tsumogiri": is_tsumogiri,
-                "is_riichi": declaring_riichi,
-            },
-        )
-
-        # Query the other 3 players in parallel (up to timeout_sec)
-        call_resps = await self.ipc.request_others_parallel(
-            current_seat,
-            {
-                "type": "discard_notify",
-                "seat": current_seat,
-                "tile": action_tile,
-                "is_tsumogiri": is_tsumogiri,
-                "is_riichi": declaring_riichi,
-                "remaining_tiles": self.wall.remaining_tiles,
-            },
-        )
-
-        is_houtei_discard = self.wall.remaining_tiles == 0
-        ron_seats: list[int] = []
-        pon_kan_call: tuple[int, str, list[str]] | None = None
-        chi_call: tuple[int, list[str]] | None = None
-
-        for offset in (1, 2, 3):
-          s = (current_seat + offset) % 4
-          c_resp = call_resps[s]
-          if c_resp.is_invalid:
-            return await self._trigger_chombo(s, c_resp.error_reason)
-          if c_resp.timed_out or c_resp.data is None:
-            continue
-          c_act = str(c_resp.data.get("action", "pass"))
-          if c_act == "pass":
-            continue
-
-          p_other = self.players[s]
-          if c_act == "ron":
-            if self._is_furiten(s):
-              return await self._trigger_chombo(
-                  s, "declared ron while in furiten"
+          ron_seats: list[int] = []
+          for offset in (1, 2, 3):
+            s = (current_seat + offset) % 4
+            c_resp = chankan_resps[s]
+            if c_resp.is_invalid:
+              await self._send_error(s, c_resp.error_reason)
+              continue
+            if c_resp.timed_out or c_resp.data is None:
+              continue
+            r_act = str(c_resp.data.get("action", "pass"))
+            if r_act == "pass":
+              continue
+            if r_act != "ron":
+              await self._send_error(
+                  s, f"illegal response {r_act!r} to kakan_notify"
               )
+              continue
+            # Validate Chankan Ron
+            if self._is_furiten(s):
+              await self._send_error(
+                  s, "declared chankan ron while in furiten"
+              )
+              continue
+            p_other = self.players[s]
             win_ctx = WinContext(
                 is_tsumo=False,
                 winning_token=action_tile,
@@ -815,9 +681,9 @@ class RoundEngine:
                 is_double_riichi=p_other.is_double_riichi,
                 is_ippatsu=p_other.is_ippatsu,
                 is_rinshan=False,
-                is_chankan=False,
+                is_chankan=True,
                 is_haitei=False,
-                is_houtei=is_houtei_discard,
+                is_houtei=False,
                 is_first_uncalled_turn=False,
                 dora_indicators=self.wall.dora_indicators,
                 ura_dora_indicators=self.wall.ura_dora_indicators,
@@ -829,309 +695,532 @@ class RoundEngine:
                 p_other.closed_tiles, p_other.melds, win_ctx
             )
             if not agari.is_valid:
-              return await self._trigger_chombo(
-                  s, "invalid ron declaration (no yaku or not agari)"
-              )
+              await self._send_error(s, "invalid chankan ron declaration")
+              continue
             ron_seats.append(s)
 
-          elif c_act == "pon":
-            if is_houtei_discard or p_other.is_riichi:
-              return await self._trigger_chombo(
-                  s, "cannot pon on houtei tile or while in riichi"
-              )
-            raw_tiles = c_resp.data.get("tiles")
-            called_kind = token_to_kind34(action_tile)
-            if isinstance(raw_tiles, list) and len(raw_tiles) == 2:
-              hand_pair = [str(x) for x in raw_tiles]
-              if not all(
-                  is_valid_token(x) and token_to_kind34(x) == called_kind
-                  for x in hand_pair
-              ):
-                return await self._trigger_chombo(
-                    s, f"pon tiles {hand_pair} do not match {action_tile}"
-                )
-              temp_hand = list(p_other.closed_tiles)
-              for x in hand_pair:
-                if x not in temp_hand:
-                  return await self._trigger_chombo(
-                      s, f"pon tile {x} not in hand"
-                  )
-                temp_hand.remove(x)
-            else:
-              matching = [
-                  x
-                  for x in p_other.closed_tiles
-                  if token_to_kind34(x) == called_kind
-              ]
-              if len(matching) < 2:
-                return await self._trigger_chombo(
-                    s, f"not enough tiles in hand to pon {action_tile}"
-                )
-              hand_pair = matching[:2]
-              temp_hand = list(p_other.closed_tiles)
-              for x in hand_pair:
-                temp_hand.remove(x)
+          self._update_missed_win_furiten(
+              action_tile, current_seat, set(ron_seats)
+          )
 
-            # Ensure player has at least 1 non-kuikae tile left to discard after Pon
-            forb = get_kuikae_forbidden_kinds("pon", action_tile, hand_pair)
-            if not any(token_to_kind34(x) not in forb for x in temp_hand):
-              return await self._trigger_chombo(
-                  s, "pon would leave only kuikae-forbidden tiles in hand"
-              )
-            pon_kan_call = (s, "pon", hand_pair)
+          if len(ron_seats) == 3 and self.rules.triple_ron_draw:
+            return await self._finish_abortive_draw(
+                "ryuukyoku_sanchahou",
+                actor_seat=current_seat,
+                extra={"ron_seats": ron_seats, "tile": action_tile},
+            )
+          if ron_seats:
+            return await self._finish_ron(
+                ron_seats,
+                loser_seat=current_seat,
+                winning_token=action_tile,
+                is_chankan=True,
+                is_houtei=False,
+            )
 
-          elif c_act == "daiminkan":
-            if (
-                is_houtei_discard
-                or p_other.is_riichi
-                or len(self.kans_by_seat) >= 4
+          # Chankan passed! Clear ippatsu & first-round flags right before Rinshan draw
+          self.uncalled_first_round = False
+          for p in self.players.values():
+            p.is_ippatsu = False
+
+          await self.ipc.broadcast(
+              {
+                  "type": "call_notify",
+                  "seat": current_seat,
+                  **kakan_meld.to_dict(),
+              }
+          )
+
+          # Flush any previously queued deferred kandora right before subsequent Rinshan draw,
+          # then queue this Kakan's deferred kandora
+          prev_deferred = self.wall.flush_deferred_kandora()
+          if prev_deferred:
+            await self._broadcast_new_dora(prev_deferred)
+          self.wall.queue_deferred_kandora()
+          self.kans_by_seat.append(current_seat)
+
+          need_draw = True
+          is_rinshan_draw = True
+          forbidden_discards = set()
+          continue
+
+      elif action not in ("discard", "riichi"):
+        await self._send_error(
+            current_seat, f"unknown turn action: {action!r}"
+        )
+        action = "discard"
+        action_tile = self._fallback_discard_tile(
+            player, drawn_token, forbidden_discards
+        )
+        turn_action_from_client = False
+
+      # Now `action` is guaranteed to be "discard" or "riichi"
+      declaring_riichi = action == "riichi"
+      if need_draw:
+        assert drawn_token is not None
+        full_hand = player.closed_tiles + [drawn_token]
+      else:
+        full_hand = list(player.closed_tiles)
+
+      if turn_action_from_client:
+        discard_err: str | None = None
+        if not is_valid_token(action_tile):
+          discard_err = f"invalid discard tile token: {action_tile!r}"
+        elif action_tile not in full_hand:
+          discard_err = f"discarded tile {action_tile} not in hand"
+        elif (
+            not need_draw
+            and token_to_kind34(action_tile) in forbidden_discards
+        ):
+          discard_err = (
+              f"discard of {action_tile} violates kuikae (喰い替えなし)"
+          )
+        elif player.is_riichi:
+          if declaring_riichi:
+            discard_err = "cannot declare riichi when already in riichi"
+          elif action_tile != drawn_token:
+            discard_err = (
+                f"player in riichi must tsumogiri {drawn_token}, tried {action_tile}"
+            )
+        elif declaring_riichi:
+          # Note (Option B): we do NOT check tenpai at declaration time;
+          # Noten Riichi is checked at exhaustive draw (荒牌平局)!
+          if not need_draw or not player.is_menzen:
+            discard_err = "riichi requires menzen hand on a draw turn"
+          elif self.scores[current_seat] < 1000:
+            discard_err = "riichi requires at least 1000 points"
+          elif self.wall.remaining_tiles < 4:
+            discard_err = (
+                "riichi requires at least 4 tiles remaining in live wall"
+            )
+
+        if discard_err is not None:
+          await self._send_error(current_seat, discard_err)
+          declaring_riichi = False
+          action = "discard"
+          action_tile = self._fallback_discard_tile(
+              player, drawn_token, forbidden_discards
+          )
+
+      # Right before discarding: flush any deferred kandora from Daiminkan/Kakan
+      # ('明槓/加槓は後めくり（打牌または続く嶺上の直前）')
+      if self.wall.pending_kandora_count > 0:
+        newly_flipped = self.wall.flush_deferred_kandora()
+        if newly_flipped:
+          await self._broadcast_new_dora(newly_flipped)
+
+      is_tsumogiri = need_draw and (action_tile == drawn_token)
+      full_hand.remove(action_tile)
+      player.closed_tiles = sort_tokens(full_hand)
+      player.river.append(action_tile)
+
+      # Discarding clears temporary furiten (同巡振聴の解消は打牌時),
+      # and if already in riichi from a prior turn, clears ippatsu.
+      player.temp_furiten = False
+      if player.is_riichi:
+        player.is_ippatsu = False
+
+      self.round_log.add_event(
+          {
+              "type": "discard",
+              "seat": current_seat,
+              "tile": action_tile,
+              "tsumogiri": is_tsumogiri,
+              "riichi": declaring_riichi,
+          }
+      )
+
+      # Notify the discarder of their own discard (no response needed)
+      await self.ipc.send_to(
+          current_seat,
+          {
+              "type": "discard_ack",
+              "seat": current_seat,
+              "tile": action_tile,
+              "is_tsumogiri": is_tsumogiri,
+              "is_riichi": declaring_riichi,
+          },
+      )
+
+      # Query the other 3 players in parallel (up to timeout_sec)
+      call_resps = await self.ipc.request_others_parallel(
+          current_seat,
+          {
+              "type": "discard_notify",
+              "seat": current_seat,
+              "tile": action_tile,
+              "is_tsumogiri": is_tsumogiri,
+              "is_riichi": declaring_riichi,
+              "remaining_tiles": self.wall.remaining_tiles,
+          },
+      )
+
+      is_houtei_discard = self.wall.remaining_tiles == 0
+      ron_seats: list[int] = []
+      pon_kan_call: tuple[int, str, list[str]] | None = None
+      chi_call: tuple[int, list[str]] | None = None
+
+      for offset in (1, 2, 3):
+        s = (current_seat + offset) % 4
+        c_resp = call_resps[s]
+        if c_resp.is_invalid:
+          await self._send_error(s, c_resp.error_reason)
+          continue
+        if c_resp.timed_out or c_resp.data is None:
+          continue
+        c_act = str(c_resp.data.get("action", "pass"))
+        if c_act == "pass":
+          continue
+
+        p_other = self.players[s]
+        if c_act == "ron":
+          if self._is_furiten(s):
+            await self._send_error(s, "declared ron while in furiten")
+            continue
+          win_ctx = WinContext(
+              is_tsumo=False,
+              winning_token=action_tile,
+              seat_wind_kind34=p_other.seat_wind_kind34,
+              round_wind_kind34=self.round_wind_kind34,
+              is_dealer=(s == self.dealer_seat),
+              is_riichi=p_other.is_riichi,
+              is_double_riichi=p_other.is_double_riichi,
+              is_ippatsu=p_other.is_ippatsu,
+              is_rinshan=False,
+              is_chankan=False,
+              is_haitei=False,
+              is_houtei=is_houtei_discard,
+              is_first_uncalled_turn=False,
+              dora_indicators=self.wall.dora_indicators,
+              ura_dora_indicators=self.wall.ura_dora_indicators,
+              rules=self.rules,
+              local_yaku_enabled=self.config.local_yaku,
+              pao_seats=p_other.pao_seats,
+          )
+          agari = evaluate_agari(
+              p_other.closed_tiles, p_other.melds, win_ctx
+          )
+          if not agari.is_valid:
+            await self._send_error(
+                s, "invalid ron declaration (no yaku or not agari)"
+            )
+            continue
+          ron_seats.append(s)
+
+        elif c_act == "pon":
+          if is_houtei_discard or p_other.is_riichi:
+            await self._send_error(
+                s, "cannot pon on houtei tile or while in riichi"
+            )
+            continue
+          raw_tiles = c_resp.data.get("tiles")
+          called_kind = token_to_kind34(action_tile)
+          if isinstance(raw_tiles, list) and len(raw_tiles) == 2:
+            hand_pair = [str(x) for x in raw_tiles]
+            if not all(
+                is_valid_token(x) and token_to_kind34(x) == called_kind
+                for x in hand_pair
             ):
-              return await self._trigger_chombo(
-                  s,
-                  "cannot daiminkan on houtei, in riichi, or when 4 kans exist",
+              await self._send_error(
+                  s, f"pon tiles {hand_pair} do not match {action_tile}"
               )
-            called_kind = token_to_kind34(action_tile)
+              continue
+            temp_hand = list(p_other.closed_tiles)
+            pon_err = None
+            for x in hand_pair:
+              if x not in temp_hand:
+                pon_err = f"pon tile {x} not in hand"
+                break
+              temp_hand.remove(x)
+            if pon_err is not None:
+              await self._send_error(s, pon_err)
+              continue
+          elif raw_tiles is None:
             matching = [
                 x
                 for x in p_other.closed_tiles
                 if token_to_kind34(x) == called_kind
             ]
-            if len(matching) != 3:
-              return await self._trigger_chombo(
-                  s, f"daiminkan requires 3 matching tiles for {action_tile}"
+            if len(matching) < 2:
+              await self._send_error(
+                  s, f"not enough tiles in hand to pon {action_tile}"
               )
-            pon_kan_call = (s, "daiminkan", matching)
-
-          elif c_act == "chi":
-            if offset != 1:
-              return await self._trigger_chombo(
-                  s, "chi is only allowed from kamicha (left player)"
-              )
-            if is_houtei_discard or p_other.is_riichi:
-              return await self._trigger_chombo(
-                  s, "cannot chi on houtei tile or while in riichi"
-              )
-            called_kind = token_to_kind34(action_tile)
-            if called_kind >= 27:
-              return await self._trigger_chombo(s, "cannot chi an honor tile")
-            raw_tiles = c_resp.data.get("tiles")
-            if not isinstance(raw_tiles, list) or len(raw_tiles) != 2:
-              return await self._trigger_chombo(
-                  s, "chi requires specifying 2 tiles from hand"
-              )
-            hand_pair = [str(x) for x in raw_tiles]
-            if not all(is_valid_token(x) for x in hand_pair):
-              return await self._trigger_chombo(
-                  s, f"invalid chi tiles: {hand_pair}"
-              )
+              continue
+            hand_pair = matching[:2]
             temp_hand = list(p_other.closed_tiles)
             for x in hand_pair:
-              if x not in temp_hand:
-                return await self._trigger_chombo(
-                    s, f"chi tile {x} not in hand"
-                )
               temp_hand.remove(x)
-            ks = sorted(
-                [called_kind] + [token_to_kind34(x) for x in hand_pair]
-            )
-            if (
-                ks[2] >= 27
-                or (ks[0] // 9) != (ks[2] // 9)
-                or ks[1] != ks[0] + 1
-                or ks[2] != ks[0] + 2
-            ):
-              return await self._trigger_chombo(
-                  s,
-                  f"tiles {hand_pair} + {action_tile} do not form a valid sequence",
-              )
-            forb = get_kuikae_forbidden_kinds("chi", action_tile, hand_pair)
-            if not any(token_to_kind34(x) not in forb for x in temp_hand):
-              return await self._trigger_chombo(
-                  s, "chi would leave only kuikae-forbidden tiles in hand"
-              )
-            chi_call = (s, hand_pair)
-
           else:
-            return await self._trigger_chombo(
-                s, f"unknown reaction action: {c_act!r}"
+            await self._send_error(
+                s, "pon tiles must be a list of 2 tiles from hand"
             )
+            continue
 
-        # Update furiten for any tenpai player who did not win on this discard
-        self._update_missed_win_furiten(
-            action_tile, current_seat, set(ron_seats)
-        )
-
-        # Priority 1: Ron
-        if len(ron_seats) == 3 and self.rules.triple_ron_draw:
-          return await self._finish_abortive_draw(
-              "ryuukyoku_sanchahou",
-              actor_seat=current_seat,
-              extra={"ron_seats": ron_seats, "tile": action_tile},
-          )
-        if ron_seats:
-          # Note: 'リーチ宣言牌で放銃した場合は供託料は発生しない'
-          return await self._finish_ron(
-              ron_seats,
-              loser_seat=current_seat,
-              winning_token=action_tile,
-              is_chankan=False,
-              is_houtei=is_houtei_discard,
-          )
-
-        # Discard was not Ron'd! If declaring_riichi, finalize riichi stick deposit
-        if declaring_riichi:
-          player.is_riichi = True
-          player.is_double_riichi = is_first_turn_for_player
-          player.is_ippatsu = True
-          self.scores[current_seat] -= 1000
-          self.kyoutaku += 1
-          self.riichi_sticks_this_round.append(current_seat)
-          await self.ipc.broadcast(
-              {
-                  "type": "riichi_accepted",
-                  "seat": current_seat,
-                  "is_double_riichi": player.is_double_riichi,
-                  "kyoutaku": self.kyoutaku,
-                  "points": list(self.scores),
-              }
-          )
-
-        # Check abortive draws that trigger after a discard passes without Ron:
-        # 1. 四家立直 (Four Riichi)
-        if all(self.players[s].is_riichi for s in range(4)):
-          return await self._finish_abortive_draw(
-              "ryuukyoku_suuchariichi", actor_seat=current_seat
-          )
-
-        # 2. 四槓散了 (Four Kans by 2+ players)
-        if len(self.kans_by_seat) == 4 and len(set(self.kans_by_seat)) >= 2:
-          return await self._finish_abortive_draw(
-              "ryuukyoku_suukaikan", actor_seat=current_seat
-          )
-
-        # 3. 四風連打 (Four Winds on 1st uncalled turn)
-        if self.uncalled_first_round and all(
-            len(self.players[s].river) == 1 for s in range(4)
-        ):
-          first_kinds = {
-              token_to_kind34(self.players[s].river[0]) for s in range(4)
-          }
-          if len(first_kinds) == 1 and next(iter(first_kinds)) in WIND_KINDS:
-            return await self._finish_abortive_draw(
-                "ryuukyoku_suufon_renda", actor_seat=current_seat
+          # Ensure player has at least 1 non-kuikae tile left to discard after Pon
+          forb = get_kuikae_forbidden_kinds("pon", action_tile, hand_pair)
+          if not any(token_to_kind34(x) not in forb for x in temp_hand):
+            await self._send_error(
+                s, "pon would leave only kuikae-forbidden tiles in hand"
             )
-          # First round of discards is over
-          self.uncalled_first_round = False
+            continue
+          pon_kan_call = (s, "pon", hand_pair)
 
-        # Priority 2: Pon / Daiminkan
-        if pon_kan_call is not None:
-          caller_seat, call_type, hand_used = pon_kan_call
-          caller = self.players[caller_seat]
-          for t in hand_used:
-            caller.closed_tiles.remove(t)
-          caller.sort_hand()
-          player.river_was_called = True
-
-          meld = Meld(
-              meld_type=call_type,
-              tiles=sort_tokens(hand_used + [action_tile]),
-              called_tile=action_tile,
-              from_seat=current_seat,
-          )
-          caller.melds.append(meld)
-          self._record_pao_if_applicable(
-              caller_seat, current_seat, token_to_kind34(action_tile)
-          )
-
-          self.uncalled_first_round = False
-          for p in self.players.values():
-            p.is_ippatsu = False
-
-          self.round_log.add_event(
-              {
-                  "type": call_type,
-                  "seat": caller_seat,
-                  "from_seat": current_seat,
-                  "called_tile": action_tile,
-                  "hand_tiles": list(hand_used),
-                  "mpsz": meld.to_mpsz(),
-              }
-          )
-          await self.ipc.broadcast(
-              {"type": "call_notify", "seat": caller_seat, **meld.to_dict()}
-          )
-
-          current_seat = caller_seat
-          if call_type == "daiminkan":
-            self.wall.queue_deferred_kandora()
-            self.kans_by_seat.append(caller_seat)
-            need_draw = True
-            is_rinshan_draw = True
-            forbidden_discards = set()
-          else:
-            need_draw = False
-            is_rinshan_draw = False
-            forbidden_discards = get_kuikae_forbidden_kinds(
-                "pon", action_tile, hand_used
+        elif c_act == "daiminkan":
+          if (
+              is_houtei_discard
+              or p_other.is_riichi
+              or len(self.kans_by_seat) >= 4
+          ):
+            await self._send_error(
+                s,
+                "cannot daiminkan on houtei, in riichi, or when 4 kans exist",
             )
+            continue
+          called_kind = token_to_kind34(action_tile)
+          matching = [
+              x
+              for x in p_other.closed_tiles
+              if token_to_kind34(x) == called_kind
+          ]
+          if len(matching) != 3:
+            await self._send_error(
+                s, f"daiminkan requires 3 matching tiles for {action_tile}"
+            )
+            continue
+          pon_kan_call = (s, "daiminkan", matching)
+
+        elif c_act == "chi":
+          if offset != 1:
+            await self._send_error(
+                s, "chi is only allowed from kamicha (left player)"
+            )
+            continue
+          if is_houtei_discard or p_other.is_riichi:
+            await self._send_error(
+                s, "cannot chi on houtei tile or while in riichi"
+            )
+            continue
+          called_kind = token_to_kind34(action_tile)
+          if called_kind >= 27:
+            await self._send_error(s, "cannot chi an honor tile")
+            continue
+          raw_tiles = c_resp.data.get("tiles")
+          if not isinstance(raw_tiles, list) or len(raw_tiles) != 2:
+            await self._send_error(
+                s, "chi requires specifying 2 tiles from hand"
+            )
+            continue
+          hand_pair = [str(x) for x in raw_tiles]
+          if not all(is_valid_token(x) for x in hand_pair):
+            await self._send_error(s, f"invalid chi tiles: {hand_pair}")
+            continue
+          temp_hand = list(p_other.closed_tiles)
+          chi_err = None
+          for x in hand_pair:
+            if x not in temp_hand:
+              chi_err = f"chi tile {x} not in hand"
+              break
+            temp_hand.remove(x)
+          if chi_err is not None:
+            await self._send_error(s, chi_err)
+            continue
+          ks = sorted(
+              [called_kind] + [token_to_kind34(x) for x in hand_pair]
+          )
+          if (
+              ks[2] >= 27
+              or (ks[0] // 9) != (ks[2] // 9)
+              or ks[1] != ks[0] + 1
+              or ks[2] != ks[0] + 2
+          ):
+            await self._send_error(
+                s,
+                f"tiles {hand_pair} + {action_tile} do not form a valid sequence",
+            )
+            continue
+          forb = get_kuikae_forbidden_kinds("chi", action_tile, hand_pair)
+          if not any(token_to_kind34(x) not in forb for x in temp_hand):
+            await self._send_error(
+                s, "chi would leave only kuikae-forbidden tiles in hand"
+            )
+            continue
+          chi_call = (s, hand_pair)
+
+        else:
+          await self._send_error(s, f"unknown reaction action: {c_act!r}")
           continue
 
-        # Priority 3: Chi
-        if chi_call is not None:
-          caller_seat, hand_used = chi_call
-          caller = self.players[caller_seat]
-          for t in hand_used:
-            caller.closed_tiles.remove(t)
-          caller.sort_hand()
-          player.river_was_called = True
+      # Update furiten for any tenpai player who did not win on this discard
+      self._update_missed_win_furiten(
+          action_tile, current_seat, set(ron_seats)
+      )
 
-          meld = Meld(
-              meld_type="chi",
-              tiles=sort_tokens(hand_used + [action_tile]),
-              called_tile=action_tile,
-              from_seat=current_seat,
+      # Priority 1: Ron
+      if len(ron_seats) == 3 and self.rules.triple_ron_draw:
+        return await self._finish_abortive_draw(
+            "ryuukyoku_sanchahou",
+            actor_seat=current_seat,
+            extra={"ron_seats": ron_seats, "tile": action_tile},
+        )
+      if ron_seats:
+        # Note: 'リーチ宣言牌で放銃した場合は供託料は発生しない'
+        return await self._finish_ron(
+            ron_seats,
+            loser_seat=current_seat,
+            winning_token=action_tile,
+            is_chankan=False,
+            is_houtei=is_houtei_discard,
+        )
+
+      # Discard was not Ron'd! If declaring_riichi, finalize riichi stick deposit
+      if declaring_riichi:
+        player.is_riichi = True
+        player.is_double_riichi = is_first_turn_for_player
+        player.is_ippatsu = True
+        self.scores[current_seat] -= 1000
+        self.kyoutaku += 1
+        self.riichi_sticks_this_round.append(current_seat)
+        await self.ipc.broadcast(
+            {
+                "type": "riichi_accepted",
+                "seat": current_seat,
+                "is_double_riichi": player.is_double_riichi,
+                "kyoutaku": self.kyoutaku,
+                "points": list(self.scores),
+            }
+        )
+
+      # Check abortive draws that trigger after a discard passes without Ron:
+      # 1. 四家立直 (Four Riichi)
+      if all(self.players[s].is_riichi for s in range(4)):
+        return await self._finish_abortive_draw(
+            "ryuukyoku_suuchariichi", actor_seat=current_seat
+        )
+
+      # 2. 四槓散了 (Four Kans by 2+ players)
+      if len(self.kans_by_seat) == 4 and len(set(self.kans_by_seat)) >= 2:
+        return await self._finish_abortive_draw(
+            "ryuukyoku_suukaikan", actor_seat=current_seat
+        )
+
+      # 3. 四風連打 (Four Winds on 1st uncalled turn)
+      if self.uncalled_first_round and all(
+          len(self.players[s].river) == 1 for s in range(4)
+      ):
+        first_kinds = {
+            token_to_kind34(self.players[s].river[0]) for s in range(4)
+        }
+        if len(first_kinds) == 1 and next(iter(first_kinds)) in WIND_KINDS:
+          return await self._finish_abortive_draw(
+              "ryuukyoku_suufon_renda", actor_seat=current_seat
           )
-          caller.melds.append(meld)
+        # First round of discards is over
+        self.uncalled_first_round = False
 
-          self.uncalled_first_round = False
-          for p in self.players.values():
-            p.is_ippatsu = False
+      # Priority 2: Pon / Daiminkan
+      if pon_kan_call is not None:
+        caller_seat, call_type, hand_used = pon_kan_call
+        caller = self.players[caller_seat]
+        for t in hand_used:
+          caller.closed_tiles.remove(t)
+        caller.sort_hand()
+        player.river_was_called = True
 
-          self.round_log.add_event(
-              {
-                  "type": "chi",
-                  "seat": caller_seat,
-                  "from_seat": current_seat,
-                  "called_tile": action_tile,
-                  "hand_tiles": list(hand_used),
-                  "mpsz": meld.to_mpsz(),
-              }
-          )
-          await self.ipc.broadcast(
-              {"type": "call_notify", "seat": caller_seat, **meld.to_dict()}
-          )
+        meld = Meld(
+            meld_type=call_type,
+            tiles=sort_tokens(hand_used + [action_tile]),
+            called_tile=action_tile,
+            from_seat=current_seat,
+        )
+        caller.melds.append(meld)
+        self._record_pao_if_applicable(
+            caller_seat, current_seat, token_to_kind34(action_tile)
+        )
 
-          current_seat = caller_seat
+        self.uncalled_first_round = False
+        for p in self.players.values():
+          p.is_ippatsu = False
+
+        self.round_log.add_event(
+            {
+                "type": call_type,
+                "seat": caller_seat,
+                "from_seat": current_seat,
+                "called_tile": action_tile,
+                "hand_tiles": list(hand_used),
+                "mpsz": meld.to_mpsz(),
+            }
+        )
+        await self.ipc.broadcast(
+            {"type": "call_notify", "seat": caller_seat, **meld.to_dict()}
+        )
+
+        current_seat = caller_seat
+        if call_type == "daiminkan":
+          self.wall.queue_deferred_kandora()
+          self.kans_by_seat.append(caller_seat)
+          need_draw = True
+          is_rinshan_draw = True
+          forbidden_discards = set()
+        else:
           need_draw = False
           is_rinshan_draw = False
           forbidden_discards = get_kuikae_forbidden_kinds(
-              "chi", action_tile, hand_used
+              "pon", action_tile, hand_used
           )
-          continue
+        continue
 
-        # Priority 4: All passed
-        if self.wall.remaining_tiles == 0:
-          return await self._finish_exhaustive_draw()
+      # Priority 3: Chi
+      if chi_call is not None:
+        caller_seat, hand_used = chi_call
+        caller = self.players[caller_seat]
+        for t in hand_used:
+          caller.closed_tiles.remove(t)
+        caller.sort_hand()
+        player.river_was_called = True
 
-        current_seat = (current_seat + 1) % 4
-        need_draw = True
-        is_rinshan_draw = False
-        forbidden_discards = set()
-
-      else:
-        return await self._trigger_chombo(
-            current_seat, f"unknown turn action: {action!r}"
+        meld = Meld(
+            meld_type="chi",
+            tiles=sort_tokens(hand_used + [action_tile]),
+            called_tile=action_tile,
+            from_seat=current_seat,
         )
+        caller.melds.append(meld)
+
+        self.uncalled_first_round = False
+        for p in self.players.values():
+          p.is_ippatsu = False
+
+        self.round_log.add_event(
+            {
+                "type": "chi",
+                "seat": caller_seat,
+                "from_seat": current_seat,
+                "called_tile": action_tile,
+                "hand_tiles": list(hand_used),
+                "mpsz": meld.to_mpsz(),
+            }
+        )
+        await self.ipc.broadcast(
+            {"type": "call_notify", "seat": caller_seat, **meld.to_dict()}
+        )
+
+        current_seat = caller_seat
+        need_draw = False
+        is_rinshan_draw = False
+        forbidden_discards = get_kuikae_forbidden_kinds(
+            "chi", action_tile, hand_used
+        )
+        continue
+
+      # Priority 4: All passed
+      if self.wall.remaining_tiles == 0:
+        return await self._finish_exhaustive_draw()
+
+      current_seat = (current_seat + 1) % 4
+      need_draw = True
+      is_rinshan_draw = False
+      forbidden_discards = set()
 
   async def _finish_tsumo(
       self, winner_seat: int, winning_token: str, agari: AgariResult

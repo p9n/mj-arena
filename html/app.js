@@ -775,7 +775,7 @@ function renderFinalStandings(mode) {
 
 function loadPaifuObject(data) {
   paifuData = data;
-  const rawMode = (data.rules && data.rules.ranking_mode) || "normal";
+  const rawMode = (data.rules && data.rules.ranking_mode) || "plus_minus_zero";
   const isPm0 = rawMode === "plus_minus_zero" || rawMode === "正負0" || rawMode === "pm0";
   const modeLabel = isPm0 ? "正負0" : "一般";
   const seedTag = data.seed !== undefined && data.seed !== null ? ` | Seed: ${data.seed}` : "";

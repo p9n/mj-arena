@@ -1,30 +1,30 @@
 {
-  "match_id": "20261017-214352",
+  "match_id": "20261017-231303",
   "seed": 42,
   "notation": "MPSZ (0m/0p/0s for red fives, 1z-7z for E/S/W/N/P/F/C)",
   "seating": [
     {
       "seat": 0,
       "client_index": 2,
-      "client_cmd": "/usr/bin/python3 /usr/local/google/home/phoenixshen/temp/mj/client/simple_client.py --mode=normal",
+      "client_cmd": "/usr/local/google/home/phoenixshen/temp/mj/client/simple_client --mode=normal",
       "initial_east_order": 1
     },
     {
       "seat": 1,
       "client_index": 1,
-      "client_cmd": "/usr/bin/python3 /usr/local/google/home/phoenixshen/temp/mj/client/simple_client.py --mode=normal",
+      "client_cmd": "/usr/local/google/home/phoenixshen/temp/mj/client/simple_client --mode=normal",
       "initial_east_order": 2
     },
     {
       "seat": 2,
       "client_index": 3,
-      "client_cmd": "/usr/bin/python3 /usr/local/google/home/phoenixshen/temp/mj/client/simple_client.py --mode=normal",
+      "client_cmd": "/usr/local/google/home/phoenixshen/temp/mj/client/simple_client --mode=normal",
       "initial_east_order": 3
     },
     {
       "seat": 3,
       "client_index": 0,
-      "client_cmd": "/usr/bin/python3 /usr/local/google/home/phoenixshen/temp/mj/client/simple_client.py --mode=normal",
+      "client_cmd": "/usr/local/google/home/phoenixshen/temp/mj/client/simple_client --mode=normal",
       "initial_east_order": 0
     }
   ],

@@ -296,19 +296,31 @@ Broadcast at the conclusion of a round. Below are the full schemas for each outc
     "scores_after": [25000, 25000, 25000, 25000]
   }
   ```
-- **Chombo (`錯和`)**:
+- **Chombo (`錯和` — Noten Riichi at Exhaustive Draw)**:
   ```json
   {
     "type": "round_end",
     "offender": 1,
-    "reason": "illegal discard: '9z' not in closed hand",
-    "penalty_deltas": [2000, -8000, 4000, 2000],
-    "score_deltas": [2000, -8000, 4000, 2000],
-    "scores_after": [27000, 17000, 29000, 27000]
+    "reason": "noten riichi (ノーテンリーチ) revealed at exhaustive draw",
+    "penalty_deltas": [4000, -8000, 2000, 2000],
+    "score_deltas": [4000, -8000, 2000, 2000],
+    "scores_after": [29000, 17000, 27000, 27000]
   }
   ```
 
-#### 9. `match_end`
+#### 9. `error`
+Sent privately to a player when their submitted action is illegal or malformed. Do **not** send a response to `error`.
+```json
+{
+  "type": "error",
+  "seat": 0,
+  "message": "invalid discard tile token: '9z'"
+}
+```
+- If the illegal action occurred on `turn_tsumo` or `turn_after_call`, the server ignores the illegal action and immediately performs auto-tsumogiri (or discards the rightmost legal non-kuikae tile after a call), followed by a `discard_ack`.
+- If the illegal action occurred on `discard_notify` or `kakan_notify`, the server ignores the illegal action and treats it as `"pass"`.
+
+#### 10. `match_end`
 Broadcast when the Hanchan finishes. Upon receiving `match_end`, the client should exit cleanly (`exit(0)`).
 - `"end_reason"`: One of `"all_last"` (normal South 4 / West completion), `"tobi"` (a player dropped below `0` points), or `"chombo_cap"` (`16` consecutive Chombos reached).
 - In `"normal"` ranking mode, `"final_pt"` is a float rounded to 1 decimal place.
@@ -427,14 +439,21 @@ Sent in parallel to all 3 players other than `seat` when `seat` declares `kakan`
 
 ---
 
-## 5. Critical Rules & Chombo (チョンボ) Conditions
+## 5. Illegal Operations & Chombo (チョンボ) Conditions
 
-Any illegal action immediately ends the current round as a **Chombo (錯和)**:
-- **Dealer (親 / East) Chombo**: Pays `4,000` points to each of the 3 non-dealers (`-12,000` total).
-- **Non-Dealer (子 / South, West, North) Chombo**: Pays `4,000` points to the dealer and `2,000` points to each of the other 2 non-dealers (`-8,000` total).
-- Riichi sticks declared during the aborted round are refunded; `honba` does not increase, and the same round is replayed (up to a safety cap of `16` consecutive Chombos, after which the match terminates with `"end_reason": "chombo_cap"`).
+To prevent intentional point-dumping in `"plus_minus_zero"` (`"正負0"`) mode:
+1. **Illegal Turn / Reaction Operations (Ignored with `error` Notification, No Penalty)**:
+   - Any illegal action submitted during a round (e.g., invalid discard token, discarding a tile not in hand, Kuikae violation, false `tsumo`/`ron`, Furiten `ron`, illegal `chi`/`pon`/`daiminkan`/`ankan`/`kakan`, or malformed JSON) is **ignored by the server**.
+   - The server sends a private `{"type": "error", "seat": N, "message": "..."}` notification to the offending client:
+     - On `turn_tsumo` / `turn_after_call`: the server immediately falls back to auto-tsumogiri (or rightmost legal non-kuikae tile after a call) and sends `discard_ack`.
+     - On `discard_notify` / `kakan_notify`: the server treats the response as `"pass"`.
+2. **Noten Riichi (`ノーテンリーチ`) — The Only Chombo Penalty**:
+   - Revealing a Noten hand at **Exhaustive Draw (`荒牌平局`)** after declaring Riichi immediately ends the round as a **Chombo (錯和)**:
+     - **Dealer (親 / East) Chombo**: Pays `4,000` points to each of the 3 non-dealers (`-12,000` total).
+     - **Non-Dealer (子 / South, West, North) Chombo**: Pays `4,000` points to the dealer and `2,000` points to each of the other 2 non-dealers (`-8,000` total).
+     - Riichi sticks declared during the round are refunded; `honba` does not increase, and the same round is replayed (up to a safety cap of `16` consecutive Chombos).
 
-To avoid Chombo, your client **must** enforce the following rules before sending any non-`pass` / non-tsumogiri action:
+Your client should enforce the following legality rules before sending any non-`pass` / non-tsumogiri action:
 
 ### 5.1 Kuikae Prohibition (`喰い替えなし`)
 Immediately after calling `chi` or `pon`, you are prohibited from discarding:

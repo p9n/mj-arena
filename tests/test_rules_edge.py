@@ -234,6 +234,66 @@ class RulesEdgeTest(unittest.TestCase):
 
     asyncio.run(run_scenario())
 
+  def test_illegal_operations_ignored_with_error_message(self) -> None:
+    """Verify illegal turn actions and reaction actions send error to client and are ignored without Chombo."""
+
+    async def run_scenario() -> None:
+      cfg = ServerConfig()
+      paifu = PaifuRecorder([], (1, 1), 0, cfg.rules.to_dict())
+      sent_illegal_turn = False
+      sent_illegal_reaction = False
+      received_errors: list[tuple[int, dict[str, Any]]] = []
+
+      async def handler(
+          seat: int, msg: dict[str, Any], seq: int
+      ) -> ClientResponse:
+        nonlocal sent_illegal_turn, sent_illegal_reaction
+        if msg["type"] == "turn_tsumo":
+          if seat == 0 and not sent_illegal_turn:
+            sent_illegal_turn = True
+            return ClientResponse(
+                seat=seat, data={"seq": seq, "action": "discard", "tile": "9z"}
+            )
+          return ClientResponse(
+              seat=seat,
+              data={"seq": seq, "action": "discard", "tile": msg["tile"]},
+          )
+        if msg["type"] == "discard_notify":
+          if seat == 2 and not sent_illegal_reaction:
+            sent_illegal_reaction = True
+            return ClientResponse(
+                seat=seat, data={"seq": seq, "action": "ron"}
+            )
+        return ClientResponse(seat=seat, data={"seq": seq, "action": "pass"})
+
+      ipc = FakeIPC(handler)
+
+      async def record_send_to(seat: int, message: dict[str, Any]) -> None:
+        if message.get("type") == "error":
+          received_errors.append((seat, message))
+
+      ipc.send_to = record_send_to  # type: ignore[method-assign]
+      engine = RoundEngine(
+          config=cfg,
+          ipc=ipc,
+          paifu=paifu,
+          round_wind="E",
+          round_number=1,
+          honba=0,
+          kyoutaku=0,
+          dealer_seat=0,
+          scores=[25000, 25000, 25000, 25000],
+      )
+      outcome = await engine.run()
+      self.assertNotEqual(outcome.result_type, "chombo")
+      self.assertEqual(len(received_errors), 2)
+      self.assertEqual(received_errors[0][0], 0)
+      self.assertIn("invalid discard tile token", received_errors[0][1]["message"])
+      self.assertEqual(received_errors[1][0], 2)
+      self.assertIn("ron", received_errors[1][1]["message"])
+
+    asyncio.run(run_scenario())
+
   def test_sudden_death_and_orasu_termination(self) -> None:
     """Verify South 4 and West 1..4 Sudden Death termination rules."""
     cfg = ServerConfig()
