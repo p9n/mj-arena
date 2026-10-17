@@ -4,25 +4,20 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import functools
 import json
 import os
-import random
 import resource
 import shlex
+import shutil
+import subprocess
 from typing import Any
 
 
-def _make_preexec_fn(
-    assigned_cpus: set[int], memory_limit_bytes: int
-) -> Any:
-  """Create a preexec_fn for subprocess launch that sets CPU affinity and RLIMIT_AS."""
+def _make_preexec_fn(memory_limit_bytes: int) -> Any:
+  """Create a preexec_fn for subprocess launch that sets RLIMIT_AS."""
 
   def _apply_limits() -> None:
-    if assigned_cpus and hasattr(os, "sched_setaffinity"):
-      try:
-        os.sched_setaffinity(0, assigned_cpus)
-      except OSError:
-        pass
     if memory_limit_bytes > 0:
       try:
         resource.setrlimit(
@@ -34,40 +29,22 @@ def _make_preexec_fn(
   return _apply_limits
 
 
-def get_available_cpus() -> list[int]:
-  """Return sorted list of available logical CPU indices (0 ~ nproc-1)."""
+@functools.lru_cache(maxsize=1)
+def _can_use_systemd_cpu_quota() -> bool:
+  """Return True if `systemd-run --user --scope -p CPUQuota=...` is supported."""
+  if shutil.which("systemd-run") is None:
+    return False
   try:
-    avail = sorted(os.sched_getaffinity(0))
-  except AttributeError:
-    avail = list(range(os.cpu_count() or 1))
-  return avail or [0]
-
-
-def sample_cpus_for_seats(
-    num_seats: int = 4, num_cpus: int = 1
-) -> dict[int, set[int]]:
-  """Randomly select distinct CPU indices (from 0 ~ nproc-1) for each seat."""
-  if num_cpus <= 0:
-    return {s: set() for s in range(num_seats)}
-  avail = list(get_available_cpus())
-  sys_rng = random.SystemRandom()
-  sys_rng.shuffle(avail)
-  count = min(num_cpus, len(avail))
-  result: dict[int, set[int]] = {}
-  for s in range(num_seats):
-    start = (s * count) % len(avail)
-    result[s] = {avail[(start + i) % len(avail)] for i in range(count)}
-  return result
-
-
-def get_assigned_cpus_for_seat(seat: int, num_cpus: int) -> set[int]:
-  """Randomly select `num_cpus` logical CPU cores for a single seat."""
-  del seat
-  if num_cpus <= 0:
-    return set()
-  avail = get_available_cpus()
-  count = min(num_cpus, len(avail))
-  return set(random.SystemRandom().sample(avail, count))
+    res = subprocess.run(
+        ["systemd-run", "--user", "--scope", "-q", "-p", "CPUQuota=100%", "true"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=3.0,
+        check=False,
+    )
+    return res.returncode == 0
+  except Exception:  # pylint: disable=broad-except
+    return False
 
 
 @dataclass
@@ -92,7 +69,6 @@ class ClientConnection:
       client_memory_mb: int = 4096,
       send_timeout_sec: float = 2.0,
       stderr_log_path: str | None = None,
-      assigned_cpus: set[int] | None = None,
   ) -> None:
     self.seat = seat
     self.cmd_list = shlex.split(cmd) if isinstance(cmd, str) else list(cmd)
@@ -101,11 +77,6 @@ class ClientConnection:
     self.client_memory_mb = client_memory_mb
     self.send_timeout_sec = send_timeout_sec
     self.stderr_log_path = stderr_log_path
-    self.assigned_cpus = (
-        set(assigned_cpus)
-        if assigned_cpus is not None
-        else get_assigned_cpus_for_seat(seat, client_cpus)
-    )
     self.memory_limit_bytes = client_memory_mb * 1024 * 1024
 
     self.proc: asyncio.subprocess.Process | None = None
@@ -117,12 +88,25 @@ class ClientConnection:
     self.match_start_msg: dict[str, Any] | None = None
 
   async def start(self) -> None:
-    """Spawn the client subprocess with configured resource limits."""
+    """Spawn the client subprocess with OS-scheduled CPUQuota and memory limits."""
     await self.stop()
     self._eof = False
-    preexec = _make_preexec_fn(self.assigned_cpus, self.memory_limit_bytes)
+    preexec = _make_preexec_fn(self.memory_limit_bytes)
+    exec_cmd = list(self.cmd_list)
+    if self.client_cpus > 0 and _can_use_systemd_cpu_quota():
+      quota_pct = self.client_cpus * 100
+      exec_cmd = [
+          "systemd-run",
+          "--user",
+          "--scope",
+          "-q",
+          "-p",
+          f"CPUQuota={quota_pct}%",
+          "--",
+          *exec_cmd,
+      ]
     self.proc = await asyncio.create_subprocess_exec(
-        *self.cmd_list,
+        *exec_cmd,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
