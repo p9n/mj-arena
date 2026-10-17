@@ -34,7 +34,8 @@ Server 負責啟動並管理 4 個獨立的 Client 子行程（Subprocess），�
 │   ├── match_engine.py       # 半莊狀態機 (東1~南4、西入サドンデス、飛び終了、オーラス和了/聴牌止め、Uma/Oka 結算)
 │   └── paifu.py              # MPSZ 牌譜記錄器與 JSON 匯出
 ├── client/
-│   └── simple_client.py      # 驗證用簡易 Client (支援合法摸切、基本立直/和牌/鳴牌回應與測試模式)
+│   └── simple_client.cpp     # 驗證用簡易 Client (C++20, 支援向聽數/受入計算、立直/和牌/鳴牌回應與測試模式)
+├── Makefile                  # 編譯 client/simple_client 與執行測試
 └── tests/
     ├── test_tile_mpsz.py     # MPSZ 與牌型轉換單元測試
     ├── test_agari_yaku.py    # 役種、符數、點數計算單元測試
@@ -336,10 +337,10 @@ flowchart TD
   "match_id": "20261017-172000",
   "seed": 42,
   "seating": [
-    {"seat": 0, "client_cmd": "python3 client/simple_client.py", "initial_east_order": 2},
-    {"seat": 1, "client_cmd": "python3 client/simple_client.py", "initial_east_order": 3},
-    {"seat": 2, "client_cmd": "python3 client/simple_client.py", "initial_east_order": 0},
-    {"seat": 3, "client_cmd": "python3 client/simple_client.py", "initial_east_order": 1}
+    {"seat": 0, "client_cmd": "client/simple_client --mode=normal", "initial_east_order": 2},
+    {"seat": 1, "client_cmd": "client/simple_client --mode=normal", "initial_east_order": 3},
+    {"seat": 2, "client_cmd": "client/simple_client --mode=normal", "initial_east_order": 0},
+    {"seat": 3, "client_cmd": "client/simple_client --mode=normal", "initial_east_order": 1}
   ],
   "dice_seating": [3, 4],
   "rounds": [
@@ -388,9 +389,9 @@ flowchart TD
 
 ---
 
-## 9. 驗證用 Client 設計 (`client/simple_client.py`)
+## 9. 驗證用 Client 設計 (`client/simple_client.cpp`)
 
-驗證用 Client 為獨立執行的 Python 程式，透過 `sys.stdin` 讀取 JSON 行、透過 `sys.stdout` 輸出回應並 `flush()`：
+驗證用 Client 為獨立編譯的 C++20 程式 (`client/simple_client`)，透過 `std::cin` 讀取 JSON 行、透過 `std::cout` 輸出回應並 `std::flush`：
 1. **預設策略（合法穩定對局模式）**：
    - 收到 `turn_tsumo` 時：
      - 若可自摸和牌（有役），立即宣告 `tsumo`；

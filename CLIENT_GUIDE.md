@@ -88,7 +88,7 @@ Because `turn_tsumo` and `turn_after_call` only include your closed `"hand"`, yo
    - Clear `temp_furiten = False` whenever you receive `discard_ack` (your own discard, including after `chi`/`pon`).
    - Also, while in Riichi, if you draw a winning tile on `turn_tsumo` and do not declare `"tsumo"`, set `riichi_furiten = True`.
 5. **Total Kans in the Round (`total_kans`)**: Increment whenever `call_notify` has `meld_type` in `("daiminkan", "ankan", "kakan")`. Once `total_kans >= 4`, no further kans may be declared.
-6. **Python Helper Functions**: If implementing your client in Python within this repository, you may directly import `from server.hand import Meld, get_tenpai_waits, is_tenpai, can_ankan_in_riichi, get_kuikae_forbidden_kinds` and `from server.agari import WinContext, evaluate_agari` for 100% server-identical legality and scoring checks (as demonstrated in `client/simple_client.py`).
+6. **Helper Functions & Reference Implementation**: See `client/simple_client.cpp` for a complete C++20 reference implementation of shanten/ukeire evaluation, kuikae checks, furiten tracking, and agari/yaku evaluation. If implementing your client in Python within this repository, you may also directly import `from server.hand import Meld, get_tenpai_waits, is_tenpai, can_ankan_in_riichi, get_kuikae_forbidden_kinds` and `from server.agari import WinContext, evaluate_agari`.
 
 ---
 

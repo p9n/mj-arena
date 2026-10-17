@@ -34,7 +34,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
       default=[],
       help=(
           "0 to 4 client command strings to spawn. If fewer than 4 are given, "
-          "remaining seats are filled with `simple_client.py --mode=normal`."
+          "remaining seats are filled with `client/simple_client --mode=normal`."
       ),
   )
   parser.add_argument(
@@ -102,7 +102,7 @@ async def async_main(argv: list[str] | None = None) -> int:
   config.client_log_dir = args.client_log_dir
 
   default_client_cmd = (
-      f"{sys.executable} {PROJECT_ROOT / 'client' / 'simple_client.py'} --mode=normal"
+      f"{PROJECT_ROOT / 'client' / 'simple_client'} --mode=normal"
   )
   provided_clients = list(args.clients or [])
   if len(provided_clients) > 4:

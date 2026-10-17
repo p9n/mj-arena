@@ -16,7 +16,7 @@ from server.match_engine import MatchEngine
 from server.tile import parse_mpsz
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CLIENT_SCRIPT = str(PROJECT_ROOT / "client" / "simple_client.py")
+CLIENT_BIN = str(PROJECT_ROOT / "client" / "simple_client")
 
 
 class IntegrationTest(unittest.TestCase):
@@ -48,11 +48,11 @@ class IntegrationTest(unittest.TestCase):
       parse_args(["--iterations", "2"])
 
   def test_full_hanchan_with_four_clients_and_paifu(self) -> None:
-    """Run a complete Hanchan match with 4 simple_client.py subprocesses."""
+    """Run a complete Hanchan match with 4 simple_client subprocesses."""
 
     async def run_match() -> None:
       cfg = ServerConfig.load(PROJECT_ROOT / "config.json")
-      cmd = f"{sys.executable} {CLIENT_SCRIPT} --mode normal"
+      cmd = f"{CLIENT_BIN} --mode normal"
       with tempfile.TemporaryDirectory(dir=PROJECT_ROOT) as tmpdir:
         paifu_path = Path(tmpdir) / "test_paifu.json"
         engine = MatchEngine(
@@ -101,10 +101,10 @@ class IntegrationTest(unittest.TestCase):
       cfg = ServerConfig()
       cfg.timeout_sec = 0.25  # Fast timeout for test
       cmds = [
-          f"{sys.executable} {CLIENT_SCRIPT} --mode timeout",
-          f"{sys.executable} {CLIENT_SCRIPT} --mode tsumogiri",
-          f"{sys.executable} {CLIENT_SCRIPT} --mode tsumogiri",
-          f"{sys.executable} {CLIENT_SCRIPT} --mode tsumogiri",
+          f"{CLIENT_BIN} --mode timeout",
+          f"{CLIENT_BIN} --mode tsumogiri",
+          f"{CLIENT_BIN} --mode tsumogiri",
+          f"{CLIENT_BIN} --mode tsumogiri",
       ]
       engine = MatchEngine(
           config=cfg,
@@ -152,10 +152,10 @@ class IntegrationTest(unittest.TestCase):
         cfg = ServerConfig()
         cfg.client_memory_mb = 128  # 128 MB hard limit; mem-hog tries to allocate 512 MB
         cmds = [
-            f"{sys.executable} {CLIENT_SCRIPT} --mode {mode}",
-            f"{sys.executable} {CLIENT_SCRIPT} --mode tsumogiri",
-            f"{sys.executable} {CLIENT_SCRIPT} --mode tsumogiri",
-            f"{sys.executable} {CLIENT_SCRIPT} --mode tsumogiri",
+            f"{CLIENT_BIN} --mode {mode}",
+            f"{CLIENT_BIN} --mode tsumogiri",
+            f"{CLIENT_BIN} --mode tsumogiri",
+            f"{CLIENT_BIN} --mode tsumogiri",
         ]
         engine = MatchEngine(
             config=cfg,
