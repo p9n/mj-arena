@@ -5,3 +5,4 @@ __pycache__/
 *.stderr
 client/simple_client
 client/tag_client
+client/tag_baseline
